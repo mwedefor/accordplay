@@ -122,10 +122,17 @@ const ACID_CHORD: Record<number, { value: number; chordFile: string }> = {
 const COL_I   = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
 const COL_II  = [20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10];
 const COL_III = [30, 29, 28, 27, 26, 25, 24, 23, 22, 21];
-const BASS_L  = [1, 2, 3, 4, 5, 6];
-const BASS_R  = [7, 8, 9, 10, 11, 12];
+const BASS_L  = [1, 2, 11, 4, 5, 6];
+const BASS_R  = [7, 8, 9, 10, 3, 12];
 
 type BtnColor = 'white' | 'yellow' | 'blue';
+type VisualStep = {
+  audioTime: number;
+  colors: Record<number, BtnColor>;
+  displayIdx: number;
+  delayedItems: { offsetSec: number; fn: () => void }[];
+  session: number;
+};
 const BLANK: Record<number, BtnColor> = {};
 for (let k = 0; k < 43; k++) BLANK[k] = 'white';
 
@@ -146,11 +153,42 @@ export default function AccordionScreen({ navigation }: any) {
   const schedulerRef    = useRef<any>(null);   // setInterval handle
   const nextAudioTime   = useRef(0);           // abs audio-clock time (sec) for next step
   const nextStepIdx     = useRef(0);           // which DEMO_NOTES index to schedule next
-  const visualTimers    = useRef<any[]>([]);   // setTimeout handles — cleared on stop
-  const playSession     = useRef(0);           // incremented on every start/stop
+  const playSession     = useRef(0);
+  // Visual sync: dead-reckoning from play-start snapshot (zero bridge calls per RAF frame)
+  // VISUAL_LEAD_SEC: fire setColors this many seconds BEFORE the audio step time so that
+  // React Native's rendering pipeline (~40-80 ms) completes just as the audio plays.
+  // Increase if lights still lag; decrease if they flash too early.
+  const VISUAL_LEAD_SEC = useRef(0.050);
+  const playStartWall   = useRef(0);
+  const playStartAudio  = useRef(0);
+  const stepSchedule    = useRef<VisualStep[]>([]);
+  const visualTimers    = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const rafHandle       = useRef<number | null>(null);
 
   useEffect(() => {
     initAudio().then(() => setAudioReady(true));
+  }, []);
+
+  // ── Visual sync loop ──────────────────────────────────────────────────────────
+  // Dead-reckoning: records audio-clock and wall-clock once at play start, then
+  // estimates current audio position from Date.now() — zero bridge calls per frame.
+  // Fires each step the moment estimated audio time passes its scheduled audioTime.
+  const runVisualLoop = useCallback(() => {
+    const now = playStartAudio.current + (Date.now() - playStartWall.current) / 1000;
+    while (stepSchedule.current.length > 0 && stepSchedule.current[0].audioTime <= now) {
+      const step = stepSchedule.current.shift()!;
+      if (step.session !== playSession.current) continue;
+      countRef.current = step.displayIdx;
+      setCount(step.displayIdx);
+      setColors(step.colors);
+      for (const item of step.delayedItems) {
+        const ms = Math.max(0, item.offsetSec * 1000);
+        visualTimers.current.push(setTimeout(() => {
+          if (playSession.current === step.session) item.fn();
+        }, ms));
+      }
+    }
+    rafHandle.current = requestAnimationFrame(runVisualLoop);
   }, []);
 
   // ── Manual button press ──
@@ -249,44 +287,37 @@ export default function AccordionScreen({ navigation }: any) {
     if (bassNote)  scheduleBassAt(bassNote,   stepTimeSec, (bassDurMs  ?? 1500) / 1000);
     if (chordFile) scheduleChordAt(chordFile, stepTimeSec, (chordDurMs ?? 1500) / 1000);
 
-    // ── Visuals: fire via setTimeout at the wall-clock equivalent ────────────
-    // Delay the visual by the audio hardware output latency so the button
-    // highlight fires when the note is actually heard, not when it's scheduled.
-    // getAudioOutputLatencyMs() uses ctx.outputLatency when available, or a
-    // platform-based estimate (50ms Android / 20ms iOS) as fallback.
-    const msUntilStep = Math.max(0, (stepTimeSec - getAudioCurrentTime()) * 1000 + getAudioOutputLatencyMs());
-
-    const push = (fn: () => void, delay: number) => {
-      const id = setTimeout(fn, delay);
-      visualTimers.current.push(id);
+    // ── Visuals: push to stepSchedule for dead-reckoning RAF loop ────────────
+    // Fire early by VISUAL_LEAD_SEC so RN renders before the audio plays.
+    const entry: VisualStep = {
+      audioTime: stepTimeSec - VISUAL_LEAD_SEC.current,
+      colors: { ...newColors },
+      displayIdx,
+      delayedItems: [],
+      session,
     };
 
-    push(() => {
-      if (playSession.current !== session) return;
-      countRef.current = displayIdx;
-      setCount(displayIdx);
-      setColors(newColors);
-    }, msUntilStep);
-
-    for (const { delayMs, btnIdx, color } of delayedVisuals) {
-      push(() => {
-        if (playSession.current !== session) return;
-        setColors(prev => ({ ...prev, [btnIdx]: color }));
-      }, msUntilStep + delayMs);
-      push(() => {
-        if (playSession.current !== session) return;
-        setColors(prev => ({ ...prev, [btnIdx]: 'white' }));
-      }, msUntilStep + delayMs + shadowTime);
-    }
-
-    push(() => {
-      if (playSession.current !== session) return;
-      setColors(prev => {
+    entry.delayedItems.push({
+      offsetSec: shadowTime / 1000,
+      fn: () => setColors(prev => {
         const next = { ...prev };
         for (let k = 0; k < 43; k++) { if (!delayedIndices.has(k)) next[k] = 'white'; }
         return next;
+      }),
+    });
+
+    for (const { delayMs, btnIdx, color } of delayedVisuals) {
+      entry.delayedItems.push({
+        offsetSec: delayMs / 1000,
+        fn: () => setColors(prev => ({ ...prev, [btnIdx]: color })),
       });
-    }, msUntilStep + shadowTime);
+      entry.delayedItems.push({
+        offsetSec: (delayMs + shadowTime) / 1000,
+        fn: () => setColors(prev => ({ ...prev, [btnIdx]: 'white' })),
+      });
+    }
+
+    stepSchedule.current.push(entry);
   }, []);
 
   // ── Scheduler loop — runs every SCHEDULE_INTERVAL_MS ─────────────────────────
@@ -314,18 +345,27 @@ export default function AccordionScreen({ navigation }: any) {
   const startPlay = useCallback(() => {
     if (isPlaying || !audioReady) return;
     const session = ++playSession.current;
-    nextAudioTime.current = getAudioCurrentTime() + 0.05; // 50 ms lead time
-    nextStepIdx.current   = countRef.current;
+    playStartWall.current  = Date.now();
+    playStartAudio.current = getAudioCurrentTime();
+    nextAudioTime.current  = playStartAudio.current + 0.05;
+    // Auto-calibrate: lead = RN render time (50 ms) - audio output latency.
+    // If audio latency > 50 ms, no lead needed (audio is already slow enough for RN to catch up).
+    const outputMs = getAudioOutputLatencyMs();
+    VISUAL_LEAD_SEC.current = Math.max(0, (50 - outputMs)) / 1000;
+    nextStepIdx.current    = countRef.current;
     setIsPlaying(true);
     scheduleLoop(session);
     schedulerRef.current = setInterval(() => scheduleLoop(session), SCHEDULE_INTERVAL);
-  }, [isPlaying, audioReady, scheduleLoop]);
+    rafHandle.current = requestAnimationFrame(runVisualLoop);
+  }, [isPlaying, audioReady, scheduleLoop, runVisualLoop]);
 
   const stopPlay = useCallback(() => {
     clearInterval(schedulerRef.current);
-    visualTimers.current.forEach(clearTimeout);
+    if (rafHandle.current !== null) { cancelAnimationFrame(rafHandle.current); rafHandle.current = null; }
+    stepSchedule.current = [];
+    for (const t of visualTimers.current) clearTimeout(t);
     visualTimers.current = [];
-    playSession.current++;  // invalidates any in-flight visual callbacks
+    playSession.current++;
     cancelAllScheduled();
     setIsPlaying(false);
     setColors({ ...BLANK });
@@ -333,7 +373,9 @@ export default function AccordionScreen({ navigation }: any) {
 
   const resetSong = useCallback(() => {
     clearInterval(schedulerRef.current);
-    visualTimers.current.forEach(clearTimeout);
+    if (rafHandle.current !== null) { cancelAnimationFrame(rafHandle.current); rafHandle.current = null; }
+    stepSchedule.current = [];
+    for (const t of visualTimers.current) clearTimeout(t);
     visualTimers.current = [];
     playSession.current++;
     cancelAllScheduled();

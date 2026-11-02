@@ -1,20 +1,51 @@
+import React from 'react';
+import { View, ActivityIndicator } from 'react-native';
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
 
-export default function App() {
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { DrawerProvider } from './context/DrawerContext';
+import LoginScreen    from './screens/LoginScreen';
+import HomeScreen     from './screens/HomeScreen';
+import AccordionScreen from './screens/AccordionScreen';
+
+const Stack = createNativeStackNavigator();
+
+function RootNavigator() {
+  const { token, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1a0a2e' }}>
+        <ActivityIndicator size="large" color="#c4b5fd" />
+      </View>
+    );
+  }
+
   return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      {!token ? (
+        <Stack.Screen name="Login"     component={LoginScreen} />
+      ) : (
+        <>
+          <Stack.Screen name="Home"      component={HomeScreen} />
+          <Stack.Screen name="Accordion" component={AccordionScreen} />
+        </>
+      )}
+    </Stack.Navigator>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+export default function App() {
+  return (
+    <AuthProvider>
+      <DrawerProvider>
+        <NavigationContainer>
+          <StatusBar style="light" />
+          <RootNavigator />
+        </NavigationContainer>
+      </DrawerProvider>
+    </AuthProvider>
+  );
+}

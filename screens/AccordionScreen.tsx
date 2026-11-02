@@ -5,10 +5,10 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  initAudio, playNote,
-  stopActiveTreble, playTrebleNote,
-  stopActiveBassNote, startBassNote,
-  stopActiveChord, startChordNote,
+  initAudio, playNote, playTrebleKey, playChordSample, isTrebleKey,
+  getAudioCurrentTime, getAudioOutputLatencyMs,
+  scheduleTrebleAt, scheduleBassAt, scheduleChordAt,
+  cancelAllScheduled,
 } from '../components/accordionAudio';
 import AppHeader from '../components/AppHeader';
 import SideDrawer from '../components/SideDrawer';
@@ -56,12 +56,13 @@ const TREBLE_LABELS: Record<number, { open: string; close: string }> = {
   29: { open: 'Gb2', close: 'D2'  }, 30: { open: 'Eb3', close: 'F3'  },
 };
 const BASS_LABELS: Record<number, { open: string; close: string }> = {
-  1:  { open: 'A3',  close: 'A3'  }, 2:  { open: 'A3',  close: 'E3'  },
-  3:  { open: 'D3',  close: 'D3'  }, 4:  { open: 'D3',  close: 'A3'  },
-  5:  { open: 'Bb3', close: 'Bb3' }, 6:  { open: 'Bb3', close: 'Bb3' },
-  7:  { open: 'G3',  close: 'G3'  }, 8:  { open: 'D3',  close: 'G3'  },
-  9:  { open: 'C3',  close: 'C3'  }, 10: { open: 'G3',  close: 'C3'  },
-  11: { open: 'F3',  close: 'F3'  }, 12: { open: 'C3',  close: 'F3'  },
+  // Odd values = chord buttons; even values = note buttons
+  1:  { open: 'A3',  close: 'E3'  }, 2:  { open: 'A3',  close: 'E3'  },  // acid3
+  3:  { open: 'C3',  close: 'F3'  }, 4:  { open: 'D3',  close: 'A3'  },  // acid2/4
+  5:  { open: 'Bb3', close: 'Bb3' }, 6:  { open: 'Bb3', close: 'Bb3' },  // acid5
+  7:  { open: 'D3',  close: 'G3'  }, 8:  { open: 'D3',  close: 'G3'  },  // acid0
+  9:  { open: 'G3',  close: 'C3'  }, 10: { open: 'G3',  close: 'C3'  },  // acid1
+  11: { open: 'D3',  close: 'A3'  }, 12: { open: 'C3',  close: 'F3'  },  // acid4/2
 };
 
 // ── Key → button index maps (from web PITO_KEY) ───────────────────────────────
@@ -91,69 +92,38 @@ for (const [idxStr, keys] of Object.entries(PITO_KEY)) {
   KEY_TO_BTN[keys.close] = idx; KEY_DIR[keys.close] = 'close';
 }
 
-// ── Key → audio note (derived from web TREBLE_KEY_MAP MIDI values) ────────────
-// Web uses WebAudio pitch-shifting; we fold notes down to available MP3 octaves.
-// MIDI mapping: web targetMidi → nearest available file (max octave: A4,B4,C5,D4,E4,F4,G4,Gb4,Ab4,Bb4,Db4,Eb4)
-const KEY_TO_SOUND: Record<string, string> = {
-  // aab* — Col I open bellows
-  'aab18': 'A4',  'aab20': 'Gb4', 'aab16': 'E4',
-  'aab12': 'C5',  'aab8':  'A4',  'aab5':  'Gb4',
-  'aab4':  'E4',  'aab3':  'C4',  'aab2':  'A3',
-  'aab0':  'Eb4',
-  // acb* — Col I close bellows
-  'acb36': 'D4',  'acb27': 'B4',  'acb18': 'G4',
-  'acb16': 'D4',  'acb12': 'B4',  'acb8':  'G4',
-  'acb4':  'D4',  'acb3':  'B3',  'acb2':  'G3',
-  'acb0':  'Db4',
-  // aam* — Col II open bellows
-  'aam18': 'D4',  'aam20': 'B4',  'aam16': 'A4',
-  'aam12': 'F4',  'aam8':  'D4',  'aam5':  'B4',
-  'aam4':  'A4',  'aam3':  'F4',  'aam2':  'D4',
-  'aam01': 'B3',  'aam0':  'Ab4',
-  // acm* — Col II close bellows
-  'acm36': 'G4',  'acm27': 'E4',  'acm18': 'C5',
-  'acm16': 'G4',  'acm12': 'E4',  'acm8':  'C5',
-  'acm4':  'G4',  'acm3':  'E4',  'acm2':  'C4',
-  'acm01': 'G3',  'acm0':  'Gb4',
-  // aaa* — Col III open bellows
-  'aaa20': 'E4',  'aaa16': 'D4',  'aaa12': 'Bb4',
-  'aaa8':  'G4',  'aaa5':  'E4',  'aaa4':  'D4',
-  'aaa3':  'Bb4', 'aaa2':  'G4',  'aaa01': 'E4',
-  'aaa0':  'Db4',
-  // aca* — Col III close bellows
-  'aca27': 'A4',  'aca18': 'F4',  'aca16': 'C5',
-  'aca12': 'A4',  'aca8':  'F4',  'aca4':  'C5',
-  'aca3':  'A4',  'aca2':  'F4',  'aca01': 'C4',
-  'aca0':  'Eb4',
-};
 
 // ── Bass key maps ─────────────────────────────────────────────────────────────
 // Bass note: abn_XX key → { bass button value, note name }
+// Uses octave 3 notes matching the web app (same MIDI pitches as web bass samples).
+// Web app: abn_48→G3, abn_49→D3, abn_50→C3, abn_51→G3, abn_52→F3, abn_53→C3,
+//          abn_54→E3, abn_55→A3, abn_56→A3, abn_57→D3, abn_58/59→Bb3
 const BASS_NOTE_KEY: Record<string, { value: number; note: string }> = {
-  'abn_55': { value: 2,  note: 'A3'  }, 'abn_54': { value: 2,  note: 'E3'  },
-  'abn_57': { value: 4,  note: 'D3'  }, 'abn_56': { value: 4,  note: 'A3'  },
-  'abn_59': { value: 6,  note: 'Bb3' }, 'abn_58': { value: 6,  note: 'Bb3' },
-  'abn_49': { value: 8,  note: 'D3'  }, 'abn_48': { value: 8,  note: 'G3'  },
-  'abn_51': { value: 10, note: 'G3'  }, 'abn_50': { value: 10, note: 'C3'  },
-  'abn_53': { value: 12, note: 'C3'  }, 'abn_52': { value: 12, note: 'F3'  },
+  'abn_48': { value: 8,  note: 'G3'  }, 'abn_49': { value: 8,  note: 'D3'  },  // acid0
+  'abn_50': { value: 10, note: 'C3'  }, 'abn_51': { value: 10, note: 'G3'  },  // acid1
+  'abn_52': { value: 12, note: 'F3'  }, 'abn_53': { value: 12, note: 'C3'  },  // acid2
+  'abn_54': { value: 2,  note: 'E3'  }, 'abn_55': { value: 2,  note: 'A3'  },  // acid3
+  'abn_56': { value: 4,  note: 'A3'  }, 'abn_57': { value: 4,  note: 'D3'  },  // acid4
+  'abn_58': { value: 6,  note: 'Bb3' }, 'abn_59': { value: 6,  note: 'Bb3' },  // acid5
 };
-// Bass chord: abc_N → acid index → { bass button value, note name }
-const ACID_CHORD: Record<number, { value: number; note: string }> = {
-  0: { value: 7,  note: 'G3'  }, 1: { value: 9,  note: 'C3'  },
-  2: { value: 11, note: 'F3'  }, 3: { value: 1,  note: 'A3'  },
-  4: { value: 3,  note: 'D3'  }, 5: { value: 5,  note: 'Bb3' },
-  // Close-bellows chords (abc_6–abc_11) — same buttons, different bellows direction
-  6: { value: 7,  note: 'G3'  }, 7: { value: 9,  note: 'C3'  },
-  8: { value: 11, note: 'F3'  }, 9: { value: 1,  note: 'A3'  },
-  10:{ value: 3,  note: 'D3'  }, 11:{ value: 5,  note: 'Bb3' },
+// Bass chord: abc_N → { bass button value, accordion chord sample file }
+// chordFile matches web app BASS_CHORD_KEY_MAP (files from chords/ in accordion-samples.zip).
+// Even indices = close bellows, odd = open bellows; same physical button per acid.
+const ACID_CHORD: Record<number, { value: number; chordFile: string }> = {
+  0:  { value: 7,  chordFile: '35' }, 1:  { value: 7,  chordFile: '26' },  // acid0 → button 37
+  2:  { value: 9,  chordFile: '15' }, 3:  { value: 9,  chordFile: '35' },  // acid1 → button 39
+  4:  { value: 3,  chordFile: '22' }, 5:  { value: 3,  chordFile: '15' },  // acid2 → button 33
+  6:  { value: 1,  chordFile: '41' }, 7:  { value: 1,  chordFile: '3'  },  // acid3 → button 31
+  8:  { value: 11, chordFile: '5'  }, 9:  { value: 11, chordFile: '24' },  // acid4 → button 41
+  10: { value: 5,  chordFile: '9'  }, 11: { value: 5,  chordFile: '9'  },  // acid5 → button 35
 };
 
 // ── Column layouts ────────────────────────────────────────────────────────────
 const COL_I   = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
 const COL_II  = [20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10];
 const COL_III = [30, 29, 28, 27, 26, 25, 24, 23, 22, 21];
-const BASS_L  = [1, 2, 11, 4, 5, 6];
-const BASS_R  = [7, 8, 9, 10, 3, 12];
+const BASS_L  = [1, 2, 3, 4, 5, 6];
+const BASS_R  = [7, 8, 9, 10, 11, 12];
 
 type BtnColor = 'white' | 'yellow' | 'blue';
 const BLANK: Record<number, BtnColor> = {};
@@ -168,10 +138,16 @@ export default function AccordionScreen({ navigation }: any) {
   const [speed, setSpeed] = useState(DEMO_SPEED_MS);
   const [audioReady, setAudioReady] = useState(false);
 
-  const stopRef    = useRef(false);
-  const sessionRef = useRef(0);
-  const countRef   = useRef(0);
-  const speedRef   = useRef(DEMO_SPEED_MS);
+  const stopRef         = useRef(false);
+  const sessionRef      = useRef(0);
+  const countRef        = useRef(0);
+  const speedRef        = useRef(DEMO_SPEED_MS);
+  // Lookahead scheduler state
+  const schedulerRef    = useRef<any>(null);   // setInterval handle
+  const nextAudioTime   = useRef(0);           // abs audio-clock time (sec) for next step
+  const nextStepIdx     = useRef(0);           // which DEMO_NOTES index to schedule next
+  const visualTimers    = useRef<any[]>([]);   // setTimeout handles — cleared on stop
+  const playSession     = useRef(0);           // incremented on every start/stop
 
   useEffect(() => {
     initAudio().then(() => setAudioReady(true));
@@ -180,8 +156,7 @@ export default function AccordionScreen({ navigation }: any) {
   // ── Manual button press ──
   const onPressBtn = useCallback((btnIdx: number) => {
     const pitoKey = bellowOpen ? PITO_KEY[btnIdx]?.open : PITO_KEY[btnIdx]?.close;
-    const note    = pitoKey ? KEY_TO_SOUND[pitoKey] : undefined;
-    if (note) playNote(note);
+    if (pitoKey) playTrebleKey(pitoKey);
     const c: BtnColor = bellowOpen ? 'yellow' : 'blue';
     setColors(prev => ({ ...prev, [btnIdx]: c }));
     setTimeout(() => setColors(prev => ({ ...prev, [btnIdx]: 'white' })), 350);
@@ -196,188 +171,172 @@ export default function AccordionScreen({ navigation }: any) {
     setTimeout(() => setColors(prev => ({ ...prev, [30 + value]: 'white' })), 350);
   }, [bellowOpen]);
 
-  // ── step() — faithful port of web Accordion.tsx step() ───────────────────────
-  const step = useCallback((stepStr: string, sessionId: number): Promise<void> => {
-    return new Promise<void>(resolve => {
-      const tokens = stepStr.trim().split(' ');
-      const newColors: Record<number, BtnColor> = { ...BLANK };
-      const delayedUpdates: { delayMs: number; btnIdx: number; color: BtnColor }[] = [];
-      const delayedIndices = new Set<number>();
+  // ── Lookahead scheduler ───────────────────────────────────────────────────────
+  // Parses one step, schedules its audio events at absolute audio-clock time,
+  // and queues visual (color) updates via setTimeout for the same moment.
+  const scheduleStepAt = useCallback((
+    stepStr: string,
+    stepTimeSec: number,
+    displayIdx: number,
+    session: number,
+  ) => {
+    const tokens = stepStr.trim().split(' ');
+    const newColors: Record<number, BtnColor> = { ...BLANK };
+    const delayedVisuals: { delayMs: number; btnIdx: number; color: BtnColor }[] = [];
+    const delayedIndices = new Set<number>();
 
-      // ── Phase 1: collect — parse tokens, no native audio calls ──────────────
-      const trebleThisStep = new Set<string>();
-      let bassNote:     string | null = null;
-      let bassDurMs:    number | undefined;
-      let chordNote:    string | null = null;
-      let chordDurMs:   number | undefined;
+    const trebleSet = new Set<string>();
+    let bassNote:  string | null = null;
+    let bassDurMs: number | undefined;
+    let chordFile: string | null = null;
+    let chordDurMs: number | undefined;
 
-      for (let j = 0; j < tokens.length - 1; j++) {
-        const tok     = tokens[j];
-        const atIdx   = tok.indexOf('@');
-        const body    = atIdx >= 0 ? tok.slice(0, atIdx) : tok;
-        const delayMs = atIdx >= 0 ? parseFloat(tok.slice(atIdx + 1)) : 0;
-        const colIdx  = body.indexOf(':');
-        const key          = colIdx >= 0 ? body.slice(0, colIdx) : body;
-        const noteDurUnits = colIdx >= 0 ? parseInt(body.slice(colIdx + 1)) : undefined;
+    for (let j = 0; j < tokens.length - 1; j++) {
+      const tok     = tokens[j];
+      const atIdx   = tok.indexOf('@');
+      const body    = atIdx >= 0 ? tok.slice(0, atIdx) : tok;
+      const delayMs = atIdx >= 0 ? parseFloat(tok.slice(atIdx + 1)) : 0;
+      const colIdx  = body.indexOf(':');
+      const key          = colIdx >= 0 ? body.slice(0, colIdx) : body;
+      const noteDurUnits = colIdx >= 0 ? parseInt(body.slice(colIdx + 1)) : undefined;
 
-        if (key.startsWith('abc')) {
-          const m = key.match(/abc_?(\d+)/);
-          if (m) {
-            const c = ACID_CHORD[parseInt(m[1])];
-            if (c) {
-              chordNote  = c.note;
-              // mirrors web: min(1500, max(50, (noteDurUnits/6)*speed))
-              chordDurMs = noteDurUnits !== undefined
-                ? Math.min(1500, Math.max(50, (noteDurUnits / 6) * speedRef.current))
-                : 1500;
-              const btnIdx = 30 + c.value;
-              if (delayMs > 1) {
-                delayedUpdates.push({ delayMs, btnIdx, color: 'yellow' });
-                delayedIndices.add(btnIdx);
-              } else {
-                newColors[btnIdx] = 'yellow';
-              }
-            }
-          }
-        } else if (key.startsWith('abn')) {
-          const entry = BASS_NOTE_KEY[key];
-          if (entry) {
-            bassNote  = entry.note;
-            bassDurMs = noteDurUnits !== undefined
+      if (key.startsWith('abc')) {
+        const m = key.match(/abc_?(\d+)/);
+        if (m) {
+          const acidIdx = parseInt(m[1]);
+          const c = ACID_CHORD[acidIdx];
+          if (c) {
+            chordFile  = c.chordFile;
+            chordDurMs = noteDurUnits !== undefined
               ? Math.min(1500, Math.max(50, (noteDurUnits / 6) * speedRef.current))
               : 1500;
-            const btnIdx = 30 + entry.value;
-            if (delayMs > 1) {
-              delayedUpdates.push({ delayMs, btnIdx, color: 'blue' });
-              delayedIndices.add(btnIdx);
-            } else {
-              newColors[btnIdx] = 'blue';
-            }
-          }
-        } else {
-          const btnIdx = KEY_TO_BTN[key];
-          if (btnIdx !== undefined) {
-            const note   = KEY_TO_SOUND[key];
-            const isOpen = KEY_DIR[key] === 'open';
-            if (note) {
-              newColors[btnIdx] = isOpen ? 'yellow' : 'blue';
-              trebleThisStep.add(note);
-            }
+            const btnIdx = 30 + c.value;
+            // even index = close bellows (blue), odd = open (yellow) — matches web
+            const chordColor: BtnColor = acidIdx % 2 === 0 ? 'blue' : 'yellow';
+            if (delayMs > 1) { delayedVisuals.push({ delayMs, btnIdx, color: chordColor }); delayedIndices.add(btnIdx); }
+            else              { newColors[btnIdx] = chordColor; }
           }
         }
+      } else if (key.startsWith('abn')) {
+        const entry = BASS_NOTE_KEY[key];
+        if (entry) {
+          bassNote  = entry.note;
+          bassDurMs = noteDurUnits !== undefined
+            ? Math.min(1500, Math.max(50, (noteDurUnits / 6) * speedRef.current))
+            : 1500;
+          const btnIdx = 30 + entry.value;
+          if (delayMs > 1) { delayedVisuals.push({ delayMs, btnIdx, color: 'blue' }); delayedIndices.add(btnIdx); }
+          else              { newColors[btnIdx] = 'blue'; }
+        }
+      } else {
+        const btnIdx = KEY_TO_BTN[key];
+        if (btnIdx !== undefined && isTrebleKey(key)) {
+          const isOpen = KEY_DIR[key] === 'open';
+          newColors[btnIdx] = isOpen ? 'yellow' : 'blue';
+          trebleSet.add(key);
+        }
       }
+    }
 
-      // Timing
-      const lastTok    = tokens[tokens.length - 1];
-      const units      = !isNaN(parseInt(lastTok)) ? Math.max(3, parseInt(lastTok)) : 6;
-      const shadowTime = Math.min(600, Math.max(80, (units / 6) * speedRef.current * 0.5));
-      // treble notes auto-stop at the audio clock (mirrors bass/chord durationMs approach)
-      const trebleDurMs = (units / 6) * speedRef.current;
+    const lastTok        = tokens[tokens.length - 1];
+    const units          = !isNaN(parseInt(lastTok)) ? Math.max(3, parseInt(lastTok)) : 6;
+    const stepDurationMs = (units / 6) * speedRef.current;
+    const shadowTime     = Math.min(600, Math.max(80, stepDurationMs * 0.5));
+    const trebleDurSec   = stepDurationMs / 1000;
 
-      // ── Phase 2: stop-all — queue all stop+seekTo calls together ────────────
-      // All stops are batched before any play call reaches the native layer.
-      stopActiveTreble();
-      if (bassNote)  stopActiveBassNote();
-      if (chordNote) stopActiveChord();
+    // ── Audio: scheduled at absolute audio-clock time ────────────────────────
+    for (const key of trebleSet) scheduleTrebleAt(key, stepTimeSec, trebleDurSec);
+    if (bassNote)  scheduleBassAt(bassNote,   stepTimeSec, (bassDurMs  ?? 1500) / 1000);
+    if (chordFile) scheduleChordAt(chordFile, stepTimeSec, (chordDurMs ?? 1500) / 1000);
 
-      // ── Phase 3: play-all — all play() calls land right after the stops ─────
-      // Single play() per note (no seekTo at onset — slots pre-seeked during stop).
-      for (const note of trebleThisStep) playTrebleNote(note, trebleDurMs);
-      if (bassNote)  startBassNote(bassNote,  bassDurMs);
-      if (chordNote) startChordNote(chordNote, chordDurMs);
+    // ── Visuals: fire via setTimeout at the wall-clock equivalent ────────────
+    // Delay the visual by the audio hardware output latency so the button
+    // highlight fires when the note is actually heard, not when it's scheduled.
+    // getAudioOutputLatencyMs() uses ctx.outputLatency when available, or a
+    // platform-based estimate (50ms Android / 20ms iOS) as fallback.
+    const msUntilStep = Math.max(0, (stepTimeSec - getAudioCurrentTime()) * 1000 + getAudioOutputLatencyMs());
 
-      // ── Phase 4: visual ──────────────────────────────────────────────────────
+    const push = (fn: () => void, delay: number) => {
+      const id = setTimeout(fn, delay);
+      visualTimers.current.push(id);
+    };
+
+    push(() => {
+      if (playSession.current !== session) return;
+      countRef.current = displayIdx;
+      setCount(displayIdx);
       setColors(newColors);
+    }, msUntilStep);
 
-      // Schedule delayed bass button illuminations (same as web)
-      for (const { delayMs, btnIdx, color } of delayedUpdates) {
-        setTimeout(() => {
-          if (sessionRef.current !== sessionId) return;
-          setColors(prev => ({ ...prev, [btnIdx]: color }));
-        }, delayMs);
-        setTimeout(() => {
-          if (sessionRef.current !== sessionId) return;
-          setColors(prev => ({ ...prev, [btnIdx]: 'white' }));
-        }, delayMs + shadowTime);
-      }
+    for (const { delayMs, btnIdx, color } of delayedVisuals) {
+      push(() => {
+        if (playSession.current !== session) return;
+        setColors(prev => ({ ...prev, [btnIdx]: color }));
+      }, msUntilStep + delayMs);
+      push(() => {
+        if (playSession.current !== session) return;
+        setColors(prev => ({ ...prev, [btnIdx]: 'white' }));
+      }, msUntilStep + delayMs + shadowTime);
+    }
 
-      setTimeout(() => {
-        // Reset only immediate (non-delayed) buttons after shadowTime
-        setColors(prev => {
-          const next = { ...prev };
-          for (let k = 0; k < 43; k++) {
-            if (!delayedIndices.has(k)) next[k] = 'white';
-          }
-          return next;
-        });
-        resolve();
-      }, shadowTime);
-    });
+    push(() => {
+      if (playSession.current !== session) return;
+      setColors(prev => {
+        const next = { ...prev };
+        for (let k = 0; k < 43; k++) { if (!delayedIndices.has(k)) next[k] = 'white'; }
+        return next;
+      });
+    }, msUntilStep + shadowTime);
   }, []);
 
-  // ── onClickPlay — faithful port of web onClickPlay ────────────────────────────
-  const startPlay = useCallback(async () => {
+  // ── Scheduler loop — runs every SCHEDULE_INTERVAL_MS ─────────────────────────
+  // Fills the lookahead window with pre-scheduled audio + visual events.
+  const LOOKAHEAD_SEC      = 0.5;  // schedule 500 ms ahead
+  const SCHEDULE_INTERVAL  = 100;  // refill every 100 ms
+
+  const scheduleLoop = useCallback((session: number) => {
+    const horizon = getAudioCurrentTime() + LOOKAHEAD_SEC;
+    while (nextAudioTime.current < horizon) {
+      const idx     = nextStepIdx.current % DEMO_NOTES.length;
+      const stepStr = DEMO_NOTES[idx];
+      scheduleStepAt(stepStr, nextAudioTime.current, idx, session);
+
+      const tokens      = stepStr.trim().split(' ');
+      const lastTok     = tokens[tokens.length - 1];
+      const units       = !isNaN(parseInt(lastTok)) ? Math.max(3, parseInt(lastTok)) : 6;
+      const durationSec = ((units / 6) * speedRef.current) / 1000;
+      nextAudioTime.current += durationSec;
+      nextStepIdx.current++;
+    }
+  }, [scheduleStepAt]);
+
+  // ── startPlay / stopPlay / resetSong ─────────────────────────────────────────
+  const startPlay = useCallback(() => {
     if (isPlaying || !audioReady) return;
-    stopRef.current = false;
-    const mySession = ++sessionRef.current;
+    const session = ++playSession.current;
+    nextAudioTime.current = getAudioCurrentTime() + 0.05; // 50 ms lead time
+    nextStepIdx.current   = countRef.current;
     setIsPlaying(true);
-
-    // Drift-correcting loop: track expected wall-clock time and shorten each
-    // wait to compensate for accumulated JS-thread overhead (RN bridge adds
-    // ~5-15ms per step vs browser, which makes the song feel slower over time).
-    let anchorMs  = performance.now();
-    let expectedMs = 0;
-
-    while (!stopRef.current && mySession === sessionRef.current) {
-      if (countRef.current >= DEMO_NOTES.length) {
-        countRef.current = 0;
-        setCount(0);
-        // Re-anchor drift clock on loop-around so error doesn't compound
-        anchorMs   = performance.now();
-        expectedMs = 0;
-      }
-
-      const pos     = countRef.current;
-      const stepStr = DEMO_NOTES[pos];
-
-      const tokens  = stepStr.trim().split(' ');
-      const lastTok = tokens[tokens.length - 1];
-      const units   = !isNaN(parseInt(lastTok)) ? Math.max(3, parseInt(lastTok)) : 6;
-      const stepDurationMs = (units / 6) * speedRef.current;
-      expectedMs += stepDurationMs;
-
-      await step(stepStr, mySession);
-      if (mySession !== sessionRef.current) break;
-
-      // Wait only until expectedMs from anchor, compensating for any overhead
-      // that accumulated in step() and prior iterations.
-      const remainingMs = Math.max(0, expectedMs - (performance.now() - anchorMs));
-
-      await new Promise<void>(res => setTimeout(res, remainingMs));
-      if (mySession !== sessionRef.current) break;
-
-      if (countRef.current === pos) countRef.current++;
-      setCount(countRef.current);
-
-      if (stopRef.current) break;
-    }
-
-    if (mySession === sessionRef.current) {
-      setIsPlaying(false);
-      setColors({ ...BLANK });
-    }
-  }, [isPlaying, audioReady, step]);
+    scheduleLoop(session);
+    schedulerRef.current = setInterval(() => scheduleLoop(session), SCHEDULE_INTERVAL);
+  }, [isPlaying, audioReady, scheduleLoop]);
 
   const stopPlay = useCallback(() => {
-    stopRef.current = true;
-    sessionRef.current++;
+    clearInterval(schedulerRef.current);
+    visualTimers.current.forEach(clearTimeout);
+    visualTimers.current = [];
+    playSession.current++;  // invalidates any in-flight visual callbacks
+    cancelAllScheduled();
     setIsPlaying(false);
     setColors({ ...BLANK });
   }, []);
 
   const resetSong = useCallback(() => {
-    stopRef.current = true;
-    sessionRef.current++;
+    clearInterval(schedulerRef.current);
+    visualTimers.current.forEach(clearTimeout);
+    visualTimers.current = [];
+    playSession.current++;
+    cancelAllScheduled();
     setIsPlaying(false);
     setColors({ ...BLANK });
     countRef.current = 0;

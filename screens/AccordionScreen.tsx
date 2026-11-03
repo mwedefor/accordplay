@@ -1,14 +1,14 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  ScrollView, Dimensions,
+  ScrollView, Dimensions, Animated,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  initAudio, playNote, playTrebleKey, playChordSample, isTrebleKey,
+  initAudio, playNote, playTrebleKey, isTrebleKey,
   getAudioCurrentTime, getAudioOutputLatencyMs,
   scheduleTrebleAt, scheduleBassAt, scheduleChordAt,
-  cancelAllScheduled,
+  cancelAllScheduled, sweepEndedSources,
 } from '../components/accordionAudio';
 import AppHeader from '../components/AppHeader';
 import SideDrawer from '../components/SideDrawer';
@@ -126,98 +126,67 @@ const BASS_L  = [1, 2, 11, 4, 5, 6];
 const BASS_R  = [7, 8, 9, 10, 3, 12];
 
 type BtnColor = 'white' | 'yellow' | 'blue';
-type VisualStep = {
-  audioTime: number;
-  colors: Record<number, BtnColor>;
-  displayIdx: number;
-  delayedItems: { offsetSec: number; fn: () => void }[];
-  session: number;
-};
 const BLANK: Record<number, BtnColor> = {};
 for (let k = 0; k < 43; k++) BLANK[k] = 'white';
 
 // ── Main screen ───────────────────────────────────────────────────────────────
 export default function AccordionScreen({ navigation }: any) {
   const [bellowOpen, setBellowOpen] = useState(true);
-  const [colors, setColors] = useState<Record<number, BtnColor>>({ ...BLANK });
   const [isPlaying, setIsPlaying] = useState(false);
   const [count, setCount] = useState(0);
   const [speed, setSpeed] = useState(DEMO_SPEED_MS);
   const [audioReady, setAudioReady] = useState(false);
 
-  const stopRef         = useRef(false);
-  const sessionRef      = useRef(0);
-  const countRef        = useRef(0);
-  const speedRef        = useRef(DEMO_SPEED_MS);
-  // Lookahead scheduler state
-  const schedulerRef    = useRef<any>(null);   // setInterval handle
-  const nextAudioTime   = useRef(0);           // abs audio-clock time (sec) for next step
-  const nextStepIdx     = useRef(0);           // which DEMO_NOTES index to schedule next
-  const playSession     = useRef(0);
-  // Visual sync: dead-reckoning from play-start snapshot (zero bridge calls per RAF frame)
-  // VISUAL_LEAD_SEC: fire setColors this many seconds BEFORE the audio step time so that
-  // React Native's rendering pipeline (~40-80 ms) completes just as the audio plays.
-  // Increase if lights still lag; decrease if they flash too early.
-  const VISUAL_LEAD_SEC = useRef(0.050);
-  const playStartWall   = useRef(0);
-  const playStartAudio  = useRef(0);
-  const stepSchedule    = useRef<VisualStep[]>([]);
-  const visualTimers    = useRef<ReturnType<typeof setTimeout>[]>([]);
-  const rafHandle       = useRef<number | null>(null);
+  const countRef    = useRef(0);
+  const speedRef    = useRef(DEMO_SPEED_MS);
+  const playSession = useRef(0);
+
+  // ── Lookahead scheduler refs ────────────────────────────────────────────────
+  const schedulerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const nextAudioTime  = useRef(0);
+  const nextStepIdx    = useRef(0);
+  const LOOKAHEAD_SEC  = 0.5;
+  const SCHEDULE_INTERVAL = 100;
+
+  // Visual timers — setTimeout handles both step highlights and shadow resets.
+  const activeTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  // ── Animated button colors (UI thread — no React re-render per color change) ──
+  // Index 0-30 = treble buttons, 31-42 = bass (30 + value).
+  const btnAnimsRef = useRef(
+    Array.from({ length: 43 }, () => ({
+      yellow: new Animated.Value(0),
+      blue:   new Animated.Value(0),
+    }))
+  );
+  const btnCurrentColors = useRef<BtnColor[]>(Array(43).fill('white'));
+
+  const applyAnimColor = useCallback((idx: number, color: BtnColor) => {
+    if (idx < 0 || idx >= 43) return;
+    if (btnCurrentColors.current[idx] === color) return;
+    btnCurrentColors.current[idx] = color;
+    const anim = btnAnimsRef.current[idx];
+    Animated.timing(anim.yellow, { toValue: color === 'yellow' ? 1 : 0, duration: 0, useNativeDriver: true }).start();
+    Animated.timing(anim.blue,   { toValue: color === 'blue'   ? 1 : 0, duration: 0, useNativeDriver: true }).start();
+  }, []);
+
+  const applyAnimColors = useCallback((colorMap: Record<number, BtnColor>) => {
+    for (let k = 0; k < 43; k++) applyAnimColor(k, colorMap[k] ?? 'white');
+  }, [applyAnimColor]);
+
+  const resetAllAnims = useCallback(() => {
+    for (let k = 0; k < 43; k++) applyAnimColor(k, 'white');
+  }, [applyAnimColor]);
 
   useEffect(() => {
     initAudio().then(() => setAudioReady(true));
   }, []);
 
-  // ── Visual sync loop ──────────────────────────────────────────────────────────
-  // Dead-reckoning: records audio-clock and wall-clock once at play start, then
-  // estimates current audio position from Date.now() — zero bridge calls per frame.
-  // Fires each step the moment estimated audio time passes its scheduled audioTime.
-  const runVisualLoop = useCallback(() => {
-    const now = playStartAudio.current + (Date.now() - playStartWall.current) / 1000;
-    while (stepSchedule.current.length > 0 && stepSchedule.current[0].audioTime <= now) {
-      const step = stepSchedule.current.shift()!;
-      if (step.session !== playSession.current) continue;
-      countRef.current = step.displayIdx;
-      setCount(step.displayIdx);
-      setColors(step.colors);
-      for (const item of step.delayedItems) {
-        const ms = Math.max(0, item.offsetSec * 1000);
-        visualTimers.current.push(setTimeout(() => {
-          if (playSession.current === step.session) item.fn();
-        }, ms));
-      }
-    }
-    rafHandle.current = requestAnimationFrame(runVisualLoop);
-  }, []);
-
-  // ── Manual button press ──
-  const onPressBtn = useCallback((btnIdx: number) => {
-    const pitoKey = bellowOpen ? PITO_KEY[btnIdx]?.open : PITO_KEY[btnIdx]?.close;
-    if (pitoKey) playTrebleKey(pitoKey);
-    const c: BtnColor = bellowOpen ? 'yellow' : 'blue';
-    setColors(prev => ({ ...prev, [btnIdx]: c }));
-    setTimeout(() => setColors(prev => ({ ...prev, [btnIdx]: 'white' })), 350);
-  }, [bellowOpen]);
-
-  const onPressBass = useCallback((value: number) => {
-    const lbl  = BASS_LABELS[value];
-    const note = bellowOpen ? lbl?.open : lbl?.close;
-    if (note) playNote(note);
-    const c: BtnColor = bellowOpen ? 'yellow' : 'blue';
-    setColors(prev => ({ ...prev, [30 + value]: c }));
-    setTimeout(() => setColors(prev => ({ ...prev, [30 + value]: 'white' })), 350);
-  }, [bellowOpen]);
-
-  // ── Lookahead scheduler ───────────────────────────────────────────────────────
-  // Parses one step, schedules its audio events at absolute audio-clock time,
-  // and queues visual (color) updates via setTimeout for the same moment.
-  const scheduleStepAt = useCallback((
-    stepStr: string,
-    stepTimeSec: number,
-    displayIdx: number,
-    session: number,
-  ) => {
+  // ── Lookahead step scheduler ──────────────────────────────────────────────────
+  // Audio: pre-scheduled on the audio clock (runs on native audio thread).
+  // Visual: setTimeout fired at (stepTimeSec + outputLatency - audioNow) ms from now,
+  //   which corresponds to the exact wall-clock moment the sound reaches the speakers.
+  //   setTimeout fires once — no RAF polling, no JS thread 60fps overhead.
+  const scheduleStepAt = useCallback((stepStr: string, stepTimeSec: number, displayIdx: number, session: number) => {
     const tokens = stepStr.trim().split(' ');
     const newColors: Record<number, BtnColor> = { ...BLANK };
     const delayedVisuals: { delayMs: number; btnIdx: number; color: BtnColor }[] = [];
@@ -249,7 +218,6 @@ export default function AccordionScreen({ navigation }: any) {
               ? Math.min(1500, Math.max(50, (noteDurUnits / 6) * speedRef.current))
               : 1500;
             const btnIdx = 30 + c.value;
-            // even index = close bellows (blue), odd = open (yellow) — matches web
             const chordColor: BtnColor = acidIdx % 2 === 0 ? 'blue' : 'yellow';
             if (delayMs > 1) { delayedVisuals.push({ delayMs, btnIdx, color: chordColor }); delayedIndices.add(btnIdx); }
             else              { newColors[btnIdx] = chordColor; }
@@ -279,111 +247,105 @@ export default function AccordionScreen({ navigation }: any) {
     const lastTok        = tokens[tokens.length - 1];
     const units          = !isNaN(parseInt(lastTok)) ? Math.max(3, parseInt(lastTok)) : 6;
     const stepDurationMs = (units / 6) * speedRef.current;
-    const shadowTime     = Math.min(600, Math.max(80, stepDurationMs * 0.5));
     const trebleDurSec   = stepDurationMs / 1000;
+    const shadowTime     = Math.min(600, Math.max(80, stepDurationMs * 0.5));
 
-    // ── Audio: scheduled at absolute audio-clock time ────────────────────────
+    // Audio: pre-scheduled on the native audio thread.
     for (const key of trebleSet) scheduleTrebleAt(key, stepTimeSec, trebleDurSec);
     if (bassNote)  scheduleBassAt(bassNote,   stepTimeSec, (bassDurMs  ?? 1500) / 1000);
     if (chordFile) scheduleChordAt(chordFile, stepTimeSec, (chordDurMs ?? 1500) / 1000);
 
-    // ── Visuals: push to stepSchedule for dead-reckoning RAF loop ────────────
-    // Fire early by VISUAL_LEAD_SEC so RN renders before the audio plays.
-    const entry: VisualStep = {
-      audioTime: stepTimeSec - VISUAL_LEAD_SEC.current,
-      colors: { ...newColors },
-      displayIdx,
-      delayedItems: [],
-      session,
-    };
+    // Visual: setTimeout fires at the wall-clock moment the sound reaches the speakers.
+    // outputLatency converts "audio scheduled time" → "time sound is heard".
+    const outputLatencySec = getAudioOutputLatencyMs() / 1000;
+    const msUntilVisual = Math.max(0, (stepTimeSec + outputLatencySec - getAudioCurrentTime()) * 1000);
 
-    entry.delayedItems.push({
-      offsetSec: shadowTime / 1000,
-      fn: () => setColors(prev => {
-        const next = { ...prev };
-        for (let k = 0; k < 43; k++) { if (!delayedIndices.has(k)) next[k] = 'white'; }
-        return next;
-      }),
-    });
+    activeTimers.current.push(setTimeout(() => {
+      if (playSession.current !== session) return;
+      countRef.current = displayIdx;
+      setCount(displayIdx);
+      applyAnimColors(newColors);
 
-    for (const { delayMs, btnIdx, color } of delayedVisuals) {
-      entry.delayedItems.push({
-        offsetSec: delayMs / 1000,
-        fn: () => setColors(prev => ({ ...prev, [btnIdx]: color })),
-      });
-      entry.delayedItems.push({
-        offsetSec: (delayMs + shadowTime) / 1000,
-        fn: () => setColors(prev => ({ ...prev, [btnIdx]: 'white' })),
-      });
-    }
+      activeTimers.current.push(setTimeout(() => {
+        if (playSession.current === session)
+          for (let k = 0; k < 43; k++) { if (!delayedIndices.has(k)) applyAnimColor(k, 'white'); }
+      }, shadowTime));
 
-    stepSchedule.current.push(entry);
-  }, []);
+      for (const { delayMs, btnIdx, color } of delayedVisuals) {
+        activeTimers.current.push(setTimeout(() => { if (playSession.current === session) applyAnimColor(btnIdx, color); }, delayMs));
+        activeTimers.current.push(setTimeout(() => { if (playSession.current === session) applyAnimColor(btnIdx, 'white'); }, delayMs + shadowTime));
+      }
+    }, msUntilVisual));
 
-  // ── Scheduler loop — runs every SCHEDULE_INTERVAL_MS ─────────────────────────
-  // Fills the lookahead window with pre-scheduled audio + visual events.
-  const LOOKAHEAD_SEC      = 0.5;  // schedule 500 ms ahead
-  const SCHEDULE_INTERVAL  = 100;  // refill every 100 ms
+    nextAudioTime.current = stepTimeSec + stepDurationMs / 1000;
+    nextStepIdx.current++;
+  }, [applyAnimColor, applyAnimColors]);
 
   const scheduleLoop = useCallback((session: number) => {
-    const horizon = getAudioCurrentTime() + LOOKAHEAD_SEC;
-    while (nextAudioTime.current < horizon) {
-      const idx     = nextStepIdx.current % DEMO_NOTES.length;
-      const stepStr = DEMO_NOTES[idx];
-      scheduleStepAt(stepStr, nextAudioTime.current, idx, session);
-
-      const tokens      = stepStr.trim().split(' ');
-      const lastTok     = tokens[tokens.length - 1];
-      const units       = !isNaN(parseInt(lastTok)) ? Math.max(3, parseInt(lastTok)) : 6;
-      const durationSec = ((units / 6) * speedRef.current) / 1000;
-      nextAudioTime.current += durationSec;
-      nextStepIdx.current++;
+    sweepEndedSources();
+    const lookaheadEnd = getAudioCurrentTime() + LOOKAHEAD_SEC;
+    while (nextAudioTime.current < lookaheadEnd) {
+      scheduleStepAt(
+        DEMO_NOTES[nextStepIdx.current % DEMO_NOTES.length],
+        nextAudioTime.current,
+        nextStepIdx.current % DEMO_NOTES.length,
+        session,
+      );
     }
   }, [scheduleStepAt]);
+
+  // ── Manual button press ──────────────────────────────────────────────────────
+  const onPressBtn = useCallback((btnIdx: number) => {
+    const pitoKey = bellowOpen ? PITO_KEY[btnIdx]?.open : PITO_KEY[btnIdx]?.close;
+    if (pitoKey) playTrebleKey(pitoKey);
+    const c: BtnColor = bellowOpen ? 'yellow' : 'blue';
+    applyAnimColor(btnIdx, c);
+    setTimeout(() => applyAnimColor(btnIdx, 'white'), 350);
+  }, [bellowOpen, applyAnimColor]);
+
+  const onPressBass = useCallback((value: number) => {
+    const lbl  = BASS_LABELS[value];
+    const note = bellowOpen ? lbl?.open : lbl?.close;
+    if (note) playNote(note);
+    const c: BtnColor = bellowOpen ? 'yellow' : 'blue';
+    applyAnimColor(30 + value, c);
+    setTimeout(() => applyAnimColor(30 + value, 'white'), 350);
+  }, [bellowOpen, applyAnimColor]);
 
   // ── startPlay / stopPlay / resetSong ─────────────────────────────────────────
   const startPlay = useCallback(() => {
     if (isPlaying || !audioReady) return;
     const session = ++playSession.current;
-    playStartWall.current  = Date.now();
-    playStartAudio.current = getAudioCurrentTime();
-    nextAudioTime.current  = playStartAudio.current + 0.05;
-    // Auto-calibrate: lead = RN render time (50 ms) - audio output latency.
-    // If audio latency > 50 ms, no lead needed (audio is already slow enough for RN to catch up).
-    const outputMs = getAudioOutputLatencyMs();
-    VISUAL_LEAD_SEC.current = Math.max(0, (50 - outputMs)) / 1000;
-    nextStepIdx.current    = countRef.current;
+
+    nextAudioTime.current = getAudioCurrentTime() + 0.05;
+    nextStepIdx.current   = countRef.current;
+
     setIsPlaying(true);
     scheduleLoop(session);
     schedulerRef.current = setInterval(() => scheduleLoop(session), SCHEDULE_INTERVAL);
-    rafHandle.current = requestAnimationFrame(runVisualLoop);
-  }, [isPlaying, audioReady, scheduleLoop, runVisualLoop]);
+  }, [isPlaying, audioReady, scheduleLoop]);
 
   const stopPlay = useCallback(() => {
-    clearInterval(schedulerRef.current);
-    if (rafHandle.current !== null) { cancelAnimationFrame(rafHandle.current); rafHandle.current = null; }
-    stepSchedule.current = [];
-    for (const t of visualTimers.current) clearTimeout(t);
-    visualTimers.current = [];
     playSession.current++;
+    if (schedulerRef.current !== null) { clearInterval(schedulerRef.current); schedulerRef.current = null; }
+    for (const t of activeTimers.current) clearTimeout(t);
+    activeTimers.current = [];
     cancelAllScheduled();
     setIsPlaying(false);
-    setColors({ ...BLANK });
-  }, []);
+    resetAllAnims();
+  }, [resetAllAnims]);
 
   const resetSong = useCallback(() => {
-    clearInterval(schedulerRef.current);
-    if (rafHandle.current !== null) { cancelAnimationFrame(rafHandle.current); rafHandle.current = null; }
-    stepSchedule.current = [];
-    for (const t of visualTimers.current) clearTimeout(t);
-    visualTimers.current = [];
     playSession.current++;
+    if (schedulerRef.current !== null) { clearInterval(schedulerRef.current); schedulerRef.current = null; }
+    for (const t of activeTimers.current) clearTimeout(t);
+    activeTimers.current = [];
     cancelAllScheduled();
     setIsPlaying(false);
-    setColors({ ...BLANK });
+    resetAllAnims();
     countRef.current = 0;
     setCount(0);
-  }, []);
+  }, [resetAllAnims]);
 
   const adjustSpeed = (delta: number) => {
     const s = Math.max(100, Math.min(1200, speed + delta));
@@ -392,9 +354,9 @@ export default function AccordionScreen({ navigation }: any) {
   };
 
   // ── Render treble button ──────────────────────────────────────────────────────
+  // Color overlays run on the native UI thread via Animated — no React re-render.
   const renderPito = (idx: number) => {
-    const c   = colors[idx] ?? 'white';
-    const tok = c === 'yellow' ? T.btnYellow : c === 'blue' ? T.btnBlue : T.btnWhite;
+    const { yellow, blue } = btnAnimsRef.current[idx];
     const lbl = TREBLE_LABELS[idx];
     return (
       <TouchableOpacity
@@ -403,13 +365,12 @@ export default function AccordionScreen({ navigation }: any) {
         activeOpacity={0.7}
         style={[s.btn, {
           width: BTN_D, height: BTN_D, borderRadius: BTN_D / 2,
-          backgroundColor: tok.bg, borderColor: tok.border,
-          shadowColor: c !== 'white' ? tok.bg : 'transparent',
-          shadowOpacity: c !== 'white' ? 0.7 : 0,
-          shadowRadius: 6, elevation: c !== 'white' ? 6 : 2,
-          transform: [{ scale: c !== 'white' ? 1.1 : 1 }],
+          backgroundColor: T.btnWhite.bg, borderColor: T.btnWhite.border,
+          overflow: 'hidden',
         }]}
       >
+        <Animated.View style={[s.btnOverlay, { backgroundColor: T.btnYellow.bg, opacity: yellow }]} />
+        <Animated.View style={[s.btnOverlay, { backgroundColor: T.btnBlue.bg,   opacity: blue   }]} />
         {lbl && (
           <View style={s.lblWrap} pointerEvents="none">
             <Text style={[s.lbl, { color: T.labelOpen,  fontSize: BTN_D < 36 ? 7 : 9 }]}>{lbl.open}</Text>
@@ -422,8 +383,7 @@ export default function AccordionScreen({ navigation }: any) {
 
   // ── Render bass button ────────────────────────────────────────────────────────
   const renderBass = (value: number) => {
-    const c   = colors[30 + value] ?? 'white';
-    const tok = c === 'yellow' ? T.btnYellow : c === 'blue' ? T.btnBlue : T.btnWhite;
+    const { yellow, blue } = btnAnimsRef.current[30 + value];
     const lbl = BASS_LABELS[value];
     return (
       <TouchableOpacity
@@ -432,13 +392,12 @@ export default function AccordionScreen({ navigation }: any) {
         activeOpacity={0.7}
         style={[s.btn, {
           width: BASS_D, height: BASS_D, borderRadius: BASS_D / 2,
-          backgroundColor: tok.bg, borderColor: tok.border,
-          shadowColor: c !== 'white' ? tok.bg : 'transparent',
-          shadowOpacity: c !== 'white' ? 0.7 : 0,
-          shadowRadius: 6, elevation: c !== 'white' ? 6 : 2,
-          transform: [{ scale: c !== 'white' ? 1.1 : 1 }],
+          backgroundColor: T.btnWhite.bg, borderColor: T.btnWhite.border,
+          overflow: 'hidden',
         }]}
       >
+        <Animated.View style={[s.btnOverlay, { backgroundColor: T.btnYellow.bg, opacity: yellow }]} />
+        <Animated.View style={[s.btnOverlay, { backgroundColor: T.btnBlue.bg,   opacity: blue   }]} />
         {lbl && (
           <View style={s.lblWrap} pointerEvents="none">
             <Text style={[s.lbl, { color: T.labelOpen,  fontSize: 7 }]}>{lbl.open}</Text>
@@ -563,6 +522,7 @@ const s = StyleSheet.create({
   colHdr:      { fontSize: 10, fontWeight: '600', letterSpacing: 1, marginBottom: 4, textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
 
   btn:         { borderWidth: 2, justifyContent: 'center', alignItems: 'center', shadowOffset: { width: 0, height: 2 } },
+  btnOverlay:  { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
   lblWrap:     { position: 'absolute', bottom: 1, left: 0, right: 0, alignItems: 'center' },
   lbl:         { fontWeight: '700', letterSpacing: 0.3, lineHeight: 10, textShadowColor: 'rgba(0,0,0,0.95)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
 });

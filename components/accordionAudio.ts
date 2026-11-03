@@ -102,11 +102,26 @@ const BASS_SAMPLE_MAP: Record<string, { sampleKey: string; rate: number }> = {
 let _ctx: AudioContext | null = null;
 const _buffers: Record<string, any> = {};
 let audioReady = false;
-let _allSources: any[] = [];
+
+// Each entry tracks the source node and the audio-clock time it is guaranteed to be done.
+// onEnded may not fire reliably on all Android versions, so we also sweep by endTimeSec.
+type SourceEntry = { source: any; endTimeSec: number };
+let _allSources: SourceEntry[] = [];
 
 function _getCtx(): AudioContext {
   if (!_ctx) _ctx = new AudioContext();
   return _ctx;
+}
+
+// Removes sources whose scheduled end time has passed and disconnects them.
+// Call periodically (e.g. every scheduler tick) to prevent accumulation.
+export function sweepEndedSources(): void {
+  const now = _getCtx().currentTime;
+  _allSources = _allSources.filter(({ source, endTimeSec }) => {
+    if (endTimeSec > now) return true;
+    try { source.disconnect(); } catch {}
+    return false;
+  });
 }
 
 function _playAt(sampleKey: string, startTime: number, durationSec?: number, rate = 1): any | null {
@@ -130,10 +145,13 @@ function _playAt(sampleKey: string, startTime: number, durationSec?: number, rat
     return null;
   }
 
-  _allSources.push(source);
+  // endTimeSec: add 200ms buffer so a slightly late onEnded never leaves a dangling entry.
+  const endTimeSec = startTime + (durationSec ?? 0) + 0.2;
+  const entry: SourceEntry = { source, endTimeSec };
+  _allSources.push(entry);
   source.onEnded = () => {
-    const idx = _allSources.indexOf(source);
-    if (idx >= 0) _allSources.splice(idx, 1);
+    const idx = _allSources.indexOf(entry);
+    if (idx >= 0) { _allSources.splice(idx, 1); try { source.disconnect(); } catch {} }
   };
 
   return source;
@@ -207,7 +225,11 @@ export function playChordSample(chordFile: string): void {
 
 // ── Lookahead scheduling API ──────────────────────────────────────────────────
 
-// key = accordion key name (e.g. 'aca8', 'aab12') — looked up in TREBLE_KEY_MAP.
+// No-op — treble notes have an exact durationSec; they stop on their own.
+export function stopActiveTreble(): void {}
+
+// Pre-schedules a treble key at startTimeSec on the audio clock with an exact durationSec.
+// The audio engine handles timing independently of the JS thread.
 export function scheduleTrebleAt(key: string, startTimeSec: number, durationSec: number): void {
   const entry = TREBLE_KEY_MAP[key];
   if (!entry) return;
@@ -231,15 +253,15 @@ export function scheduleChordAt(chordFile: string, startTimeSec: number, duratio
 }
 
 export function cancelAllScheduled(): void {
-  for (const src of _allSources) {
-    try { src.stop(0); } catch {}
+  for (const { source } of _allSources) {
+    try { source.stop(0); } catch {}
+    try { source.disconnect(); } catch {}
   }
   _allSources = [];
 }
 
 // ── Legacy helpers (kept for compatibility) ───────────────────────────────────
-
-export function stopActiveTreble(): void {}
+// (stopActiveTreble is now real — exported above)
 export function playTrebleNote(note: string, durationMs?: number): void {}
 export function stopActiveBassNote(): void {}
 export function stopActiveChord(): void {}

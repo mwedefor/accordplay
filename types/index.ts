@@ -13,8 +13,11 @@ export interface Song {
   instrument: string;
   link: string;
   price: number;
+  priceUSD?: number;
   createdAt: string;
   isVisible?: boolean;
+  type?: 'song' | 'folder';
+  folderId?: string;
 }
 
 export interface PurchasedSong extends Song {

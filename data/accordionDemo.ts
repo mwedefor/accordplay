@@ -1413,3 +1413,21 @@
 export const DEMO_NAME = 'El Manguito';
 export const DEMO_SPEED_MS = 250;
 
+export interface DemoSection {
+  id: string;
+  name: string;
+  start: number;
+  end: number;
+}
+
+export const DEMO_SECTIONS: DemoSection[] = (() => {
+  const N = DEMO_NOTES.length;
+  const q = Math.floor(N / 4);
+  return [
+    { id: 's1', name: 'Intro',  start: 0,     end: q     },
+    { id: 's2', name: 'Verso',  start: q,      end: q * 2 },
+    { id: 's3', name: 'Coro',   start: q * 2,  end: q * 3 },
+    { id: 's4', name: 'Final',  start: q * 3,  end: N     },
+  ];
+})();
+

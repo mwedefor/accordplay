@@ -6,6 +6,7 @@ interface User {
   id: string;
   email: string;
   name: string;
+  role: 'admin' | 'user';
 }
 
 interface AuthContextType {
@@ -35,11 +36,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (idToken) {
           const current = await getCurrentUser();
           const payload = session.tokens?.idToken?.payload;
+          const groups = payload?.['cognito:groups'];
+          const role: 'admin' | 'user' = Array.isArray(groups) && groups.includes('admin') ? 'admin' : 'user';
           setToken(idToken);
           setUser({
             id:    current.userId,
             email: payload?.email?.toString() ?? current.signInDetails?.loginId ?? '',
             name:  payload?.name?.toString() ?? current.signInDetails?.loginId?.split('@')[0] ?? '',
+            role,
           });
         }
       } catch {
@@ -62,11 +66,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!idToken) throw new Error('No se pudo obtener el token');
     const payload = session.tokens?.idToken?.payload;
     const current = await getCurrentUser();
+    const groups = payload?.['cognito:groups'];
+    const role: 'admin' | 'user' = Array.isArray(groups) && groups.includes('admin') ? 'admin' : 'user';
     setToken(idToken);
     setUser({
       id:    current.userId,
       email: payload?.email?.toString() ?? email,
       name:  payload?.name?.toString() ?? email.split('@')[0],
+      role,
     });
   };
 

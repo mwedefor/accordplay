@@ -6,9 +6,13 @@ import { StatusBar } from 'expo-status-bar';
 
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { DrawerProvider } from './context/DrawerContext';
-import LoginScreen    from './screens/LoginScreen';
-import HomeScreen     from './screens/HomeScreen';
-import AccordionScreen from './screens/AccordionScreen';
+import { UserProfileProvider } from './context/UserProfileContext';
+import LoginScreen        from './screens/LoginScreen';
+import HomeScreen         from './screens/HomeScreen';
+import AccordionScreen    from './screens/AccordionScreen';
+import PianoScreen        from './screens/PianoScreen';
+import SongsPage          from './screens/SongsPage';
+import SubscriptionScreen from './screens/SubscriptionScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -29,8 +33,11 @@ function RootNavigator() {
         <Stack.Screen name="Login"     component={LoginScreen} />
       ) : (
         <>
-          <Stack.Screen name="Home"      component={HomeScreen} />
-          <Stack.Screen name="Accordion" component={AccordionScreen} />
+          <Stack.Screen name="Home"         component={HomeScreen} />
+          <Stack.Screen name="Accordion"    component={AccordionScreen} />
+          <Stack.Screen name="Piano"        component={PianoScreen} />
+          <Stack.Screen name="Songs"        component={SongsPage} />
+          <Stack.Screen name="Subscription" component={SubscriptionScreen} />
         </>
       )}
     </Stack.Navigator>
@@ -40,12 +47,14 @@ function RootNavigator() {
 export default function App() {
   return (
     <AuthProvider>
-      <DrawerProvider>
-        <NavigationContainer>
-          <StatusBar style="light" />
-          <RootNavigator />
-        </NavigationContainer>
-      </DrawerProvider>
+      <UserProfileProvider>
+        <DrawerProvider>
+          <NavigationContainer>
+            <StatusBar style="light" />
+            <RootNavigator />
+          </NavigationContainer>
+        </DrawerProvider>
+      </UserProfileProvider>
     </AuthProvider>
   );
 }

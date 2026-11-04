@@ -5,10 +5,12 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { useDashboard } from '../hooks/useDashboard';
-import AppHeader from '../components/AppHeader';
-import SideDrawer from '../components/SideDrawer';
+import { useUserProfile } from '../context/UserProfileContext';
+import ScreenLayout from '../components/ScreenLayout';
+import { NAV_RAIL_W } from '../components/NavRail';
 import type { Song } from '../types';
 
 // ── YouTube thumbnail helper ──────────────────────────────────────────────────
@@ -30,15 +32,15 @@ function getYoutubeThumbnail(link: string): string | null {
 }
 
 // ── Quick actions ─────────────────────────────────────────────────────────────
-const QUICK_ACTIONS = [
-  { key: 'songs',     label: 'Explorar biblioteca', icon: 'library',              color: '#3b82f6', screen: null },
-  { key: 'mymusic',   label: 'Mis canciones',       icon: 'heart',                color: '#ef4444', screen: null },
-  { key: 'accordion', label: 'Tocar acordeón',      icon: 'apps',                 color: '#f97316', screen: 'Accordion' },
-  { key: 'piano',     label: 'Practicar piano',     icon: 'musical-note',         color: '#8b5cf6', screen: null },
-  { key: 'recorder',  label: 'Tocar flauta',        icon: 'water',                color: '#0d9488', screen: null },
-  { key: 'violin',    label: 'Tocar violín',        icon: 'musical-notes',        color: '#b45309', screen: null },
-  { key: 'guitar',    label: 'Tocar guitarra',      icon: 'musical-note-outline', color: '#ca8a04', screen: null },
-  { key: 'tasks',     label: 'Mis tareas',          icon: 'checkmark-circle',     color: '#22c55e', screen: null },
+const ALL_QUICK_ACTIONS = [
+  { key: 'songs',     label: 'Explorar biblioteca', icon: 'music',        color: '#3b82f6', screen: null,        instrument: null },
+  { key: 'mymusic',   label: 'Mis canciones',       icon: 'heart',        color: '#ef4444', screen: null,        instrument: null },
+  { key: 'accordion', label: 'Tocar acordeón',      icon: 'sliders',      color: '#f97316', screen: 'Accordion', instrument: 'accordion' },
+  { key: 'piano',     label: 'Practicar piano',     icon: 'play',         color: '#8b5cf6', screen: 'Piano',      instrument: 'piano' },
+  { key: 'recorder',  label: 'Tocar flauta',        icon: 'mic',          color: '#0d9488', screen: null,        instrument: 'recorder' },
+  { key: 'violin',    label: 'Tocar violín',        icon: 'activity',     color: '#b45309', screen: null,        instrument: 'violin' },
+  { key: 'guitar',    label: 'Tocar guitarra',      icon: 'headphones',   color: '#ca8a04', screen: null,        instrument: 'guitar' },
+  { key: 'tasks',     label: 'Mis tareas',          icon: 'check-square', color: '#22c55e', screen: null,        instrument: null },
 ];
 
 // ── Instrument emoji map ──────────────────────────────────────────────────────
@@ -74,7 +76,7 @@ function SongThumbnail({ song }: { song: Song }) {
 // ── Main component ────────────────────────────────────────────────────────────
 const BANNER_INSTRUMENTS = [
   { label: 'Acordeón', emoji: '🪗', screen: 'Accordion' },
-  { label: 'Piano',    emoji: '🎹', screen: null },
+  { label: 'Piano',    emoji: '🎹', screen: 'Piano' },
   { label: 'Flauta',   emoji: '🪈', screen: null },
   { label: 'Violín',   emoji: '🎻', screen: null },
   { label: 'Guitarra', emoji: '🎸', screen: null },
@@ -83,27 +85,35 @@ const BANNER_INSTRUMENTS = [
 export default function HomeScreen({ navigation }: any) {
   const { user } = useAuth();
   const { loading, stats, pendingTodos, recentSongs } = useDashboard();
+  const { instruments, profileLoading } = useUserProfile();
+
+  // Show all instruments while loading or if user has no purchased songs yet (new user);
+  // otherwise filter to only the instruments the user has purchased.
+  const QUICK_ACTIONS = !profileLoading && instruments.length > 0
+    ? ALL_QUICK_ACTIONS.filter(a => !a.instrument || instruments.includes(a.instrument as any))
+    : ALL_QUICK_ACTIONS;
   const { width: screenWidth } = useWindowDimensions();
 
   const firstName = user?.name?.split(' ')[0] ?? user?.email?.split('@')[0] ?? 'Músico';
 
   const BODY_PAD   = 14;
   const BANNER_PAD = 16;
-  const CTA_PAD    = 12;   // ctaBox padding
+  const CTA_PAD    = 12;
   const BTN_GAP    = 8;
+
+  const contentW = screenWidth - NAV_RAIL_W;
 
   // Banner instrument buttons: fill the ctaBox inner width
   const n       = BANNER_INSTRUMENTS.length;
   const btnSize = Math.floor(
-    (screenWidth - BODY_PAD * 2 - BANNER_PAD * 2 - CTA_PAD * 2 - BTN_GAP * (n - 1)) / n
+    (contentW - BODY_PAD * 2 - BANNER_PAD * 2 - CTA_PAD * 2 - BTN_GAP * (n - 1)) / n
   );
 
-  // Quick action buttons: uniform squares, show ~4.3 at a time to hint scroll
-  const qaSize = Math.floor((screenWidth - BODY_PAD * 2 - BTN_GAP * 3) / 4.3);
+  // Quick action buttons: 4 columns × 2 rows grid (matches web grid-cols-4)
+  const qaSize = Math.floor((contentW - BODY_PAD * 2 - BTN_GAP * 3) / 4);
 
   return (
-    <View style={styles.root}>
-      <AppHeader navigation={navigation} />
+    <ScreenLayout navigation={navigation} activeKey="Home" contentStyle={styles.root}>
 
       <ScrollView
         style={styles.scroll}
@@ -162,19 +172,19 @@ export default function HomeScreen({ navigation }: any) {
         ) : (
           <View style={styles.statsGrid}>
             {[
-              { label: 'Canciones',        value: stats.songs,                    icon: 'heart',            iconColor: '#ef4444', bg: '#fef2f2' },
-              { label: 'Instrumentos',    value: stats.instruments,              icon: 'musical-notes',    iconColor: '#f97316', bg: '#fff7ed' },
-              { label: 'Total invertido', value: `$${stats.spent.toFixed(0)}`,   icon: 'trending-up',      iconColor: '#22c55e', bg: '#f0fdf4', smallValue: true },
+              { label: 'Canciones',         value: stats.songs,                  icon: 'heart',            iconColor: '#ef4444', bg: '#fef2f2' },
+              { label: 'Instrumentos',      value: stats.instruments,            icon: 'musical-notes',    iconColor: '#f97316', bg: '#fff7ed' },
+              { label: 'Total invertido',   value: `$${stats.spent.toFixed(0)}`, icon: 'trending-up',      iconColor: '#22c55e', bg: '#f0fdf4' },
               { label: 'Tareas pendientes', value: stats.tasks,                  icon: 'checkmark-circle', iconColor: '#3b82f6', bg: '#eff6ff' },
             ].map(s => (
               <View key={s.label} style={styles.statCard}>
                 <View style={[styles.statIcon, { backgroundColor: s.bg }]}>
                   <Ionicons name={s.icon as any} size={18} color={s.iconColor} />
                 </View>
-                <View style={styles.statValueWrap}>
-                  <Text style={[styles.statValue, (s as any).smallValue && { fontSize: 14 }]}>{s.value}</Text>
+                <View style={styles.statText}>
+                  <Text style={styles.statValue} numberOfLines={1}>{s.value}</Text>
+                  <Text style={styles.statLabel} numberOfLines={1}>{s.label}</Text>
                 </View>
-                <Text style={styles.statLabel}>{s.label}</Text>
               </View>
             ))}
           </View>
@@ -185,12 +195,7 @@ export default function HomeScreen({ navigation }: any) {
           <Ionicons name="book-outline" size={18} color="#3b82f6" />
           <Text style={styles.sectionHeaderText}>Acciones rápidas</Text>
         </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.quickScroll}
-          contentContainerStyle={styles.quickContent}
-        >
+        <View style={styles.quickGrid}>
           {QUICK_ACTIONS.map(a => (
             <TouchableOpacity
               key={a.key}
@@ -203,13 +208,13 @@ export default function HomeScreen({ navigation }: any) {
               disabled={!a.screen}
               activeOpacity={0.8}
             >
-              <Ionicons name={a.icon as any} size={Math.round(qaSize * 0.38)} color="#fff" />
+              <Feather name={a.icon as any} size={Math.round(qaSize * 0.38)} color="#fff" />
               <Text style={[styles.quickLabel, { fontSize: Math.round(qaSize * 0.16) }]}>
                 {a.label.replace(' ', '\n')}
               </Text>
             </TouchableOpacity>
           ))}
-        </ScrollView>
+        </View>
 
         {/* ── Recent songs ── */}
         <View style={[styles.sectionHeader, { marginTop: 20 }]}>
@@ -245,6 +250,8 @@ export default function HomeScreen({ navigation }: any) {
                     const inst = song.instrument?.toLowerCase() ?? '';
                     if (inst === 'acordeon' || inst === 'acordeón' || inst === 'accordion') {
                       navigation.navigate('Accordion');
+                    } else if (inst === 'piano') {
+                      navigation.navigate('Piano');
                     }
                   }}
                   activeOpacity={0.7}
@@ -280,14 +287,14 @@ export default function HomeScreen({ navigation }: any) {
         <View style={{ height: 32 }} />
       </ScrollView>
 
-      <SideDrawer navigation={navigation} />
-    </View>
+    </ScreenLayout>
   );
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   root:   { flex: 1, backgroundColor: '#f1f5f9' },
+
   scroll: { flex: 1 },
   body:   { padding: 14 },
 
@@ -323,29 +330,26 @@ const styles = StyleSheet.create({
   // Loading
   loadingRow: { justifyContent: 'center', alignItems: 'center', height: 80 },
 
-  // Stats
-  statsGrid: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+  // Stats — 2×2 grid, horizontal card layout matching web (icon left, value+label right)
+  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
   statCard: {
-    flex: 1, backgroundColor: '#fff', borderRadius: 12,
-    padding: 10, alignItems: 'center',
+    width: '47.5%', backgroundColor: '#fff', borderRadius: 12,
+    padding: 10, flexDirection: 'row', alignItems: 'center', gap: 10,
     borderWidth: 1, borderColor: '#f1f5f9',
     shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 4, elevation: 1,
   },
-  statIcon:  { width: 36, height: 36, borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginBottom: 6 },
-  statValueWrap: { height: 26, justifyContent: 'center', alignItems: 'center' },
-  statValue: { fontSize: 18, fontWeight: '800', color: '#0f172a' },
-  statLabel: { fontSize: 10, color: '#94a3b8', textAlign: 'center', marginTop: 2 },
+  statIcon:  { width: 36, height: 36, borderRadius: 8, justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
+  statText:  { flex: 1, minWidth: 0 },
+  statValue: { fontSize: 17, fontWeight: '800', color: '#0f172a' },
+  statLabel: { fontSize: 10, color: '#94a3b8', marginTop: 1 },
 
   // Section header (icon + title, matches web)
   sectionHeader:     { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10 },
   sectionHeaderText: { fontSize: 15, fontWeight: '600', color: '#111827' },
 
-  // Quick actions
-  quickScroll:  { marginHorizontal: -14 },
-  quickContent: { paddingHorizontal: 14, gap: 8 },
-  quickBtn: {
-    alignItems: 'center', justifyContent: 'center', gap: 4,
-  },
+  // Quick actions — 4×2 grid (matches web grid-cols-4)
+  quickGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  quickBtn:  { alignItems: 'center', justifyContent: 'center', gap: 4 },
   quickLabel: { color: '#fff', fontWeight: '700', textAlign: 'center' },
 
   // Card

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Image } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { useDrawer } from '../context/DrawerContext';
 import { useAuth } from '../context/AuthContext';
 
@@ -13,7 +14,7 @@ interface Props {
 
 export default function AppHeader({ navigation, showBack, onBack }: Props) {
   const insets = useSafeAreaInsets();
-  const { toggle } = useDrawer();
+  const { toggle, isOpen } = useDrawer();
   const { logout } = useAuth();
   const [lang, setLang] = useState<'es' | 'en'>('es');
 
@@ -25,11 +26,10 @@ export default function AppHeader({ navigation, showBack, onBack }: Props) {
           onPress={showBack ? onBack : toggle}
           activeOpacity={0.7}
         >
-          <Ionicons
-            name={showBack ? 'chevron-back' : 'menu'}
-            size={36}
-            color="#fff"
-          />
+          {showBack
+            ? <Ionicons name="chevron-back" size={36} color="#fff" />
+            : <Feather name={isOpen ? 'x' : 'menu'} size={28} color="#fff" />
+          }
         </TouchableOpacity>
 
         <TouchableOpacity

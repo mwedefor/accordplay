@@ -225,8 +225,42 @@ export function playChordSample(chordFile: string): void {
 
 // ── Lookahead scheduling API ──────────────────────────────────────────────────
 
-// No-op — treble notes have an exact durationSec; they stop on their own.
-export function stopActiveTreble(): void {}
+// Tracks the most recent manually-played treble note (step-by-step navigation).
+// Managed separately from _allSources so sweepEndedSources never auto-disconnects it.
+let _manualTrebleSource: { source: any } | null = null;
+
+// Stops the currently held manual treble note (called at start of each manual step, like web's stopActiveTrebleNotes).
+export function stopActiveTreble(): void {
+  if (!_manualTrebleSource) return;
+  try { _manualTrebleSource.source.stop(0); } catch {}
+  try { _manualTrebleSource.source.disconnect(); } catch {}
+  _manualTrebleSource = null;
+}
+
+// Plays a treble key with no fixed duration — rings until stopActiveTreble() is called.
+// Matches web's playTrebleNote(note) behavior in step(i, false) manual navigation.
+export function playTrebleKeyManual(key: string): void {
+  stopActiveTreble();
+  const entry = TREBLE_KEY_MAP[key];
+  if (!entry) return;
+  const [sampleKey, pc, midi] = entry;
+  const ctx    = _getCtx();
+  const buffer = _buffers[sampleKey];
+  if (!buffer) return;
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  const rate = Math.pow(2, (midi - pc) / 12);
+  if (rate !== 1) source.playbackRate.value = rate;
+  source.connect(ctx.destination);
+  try {
+    source.start(ctx.currentTime);
+  } catch (e) {
+    console.warn(`[audio] manual treble start failed key=${key}`, e);
+    return;
+  }
+  source.onEnded = () => { if (_manualTrebleSource?.source === source) _manualTrebleSource = null; };
+  _manualTrebleSource = { source };
+}
 
 // Pre-schedules a treble key at startTimeSec on the audio clock with an exact durationSec.
 // The audio engine handles timing independently of the JS thread.

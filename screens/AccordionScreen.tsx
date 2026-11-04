@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  ScrollView, Dimensions, Animated,
+  useWindowDimensions, Animated, Modal, PanResponder, ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
@@ -9,12 +9,24 @@ import {
   getAudioCurrentTime, getAudioOutputLatencyMs,
   scheduleTrebleAt, scheduleBassAt, scheduleChordAt,
   cancelAllScheduled, sweepEndedSources,
+  stopActiveTreble, playTrebleKeyManual,
 } from '../components/accordionAudio';
-import AppHeader from '../components/AppHeader';
-import SideDrawer from '../components/SideDrawer';
-import { DEMO_NOTES, DEMO_NAME, DEMO_SPEED_MS } from '../data/accordionDemo';
+import ScreenLayout from '../components/ScreenLayout';
+import { NAV_RAIL_W } from '../components/NavRail';
+import { DEMO_NOTES, DEMO_NAME, DEMO_SPEED_MS, DEMO_SECTIONS } from '../data/accordionDemo';
+import { useSongParts } from '../hooks/useSongParts';
 
-const { width: SCREEN_W } = Dimensions.get('window');
+// ── Note label helpers (modes 0-3, same as web getLabel) ─────────────────────
+const ABC_TO_SOL: Record<string, string> = {
+  'C': 'Do',  'D': 'Re',   'E': 'Mi',  'F': 'Fa',  'G': 'Sol', 'A': 'La',  'B': 'Si',
+  'Cb': 'Dob', 'Db': 'Reb', 'Eb': 'Mib', 'Gb': 'Solb', 'Ab': 'Lab', 'Bb': 'Sib',
+};
+function getLabel(note: string | undefined, mode: number): string | undefined {
+  if (!note || mode === 0) return undefined;
+  const base = note.replace(/\d+$/, '');
+  if (mode === 1) return base;
+  return ABC_TO_SOL[base] ?? base;
+}
 
 // ── Design tokens — from web src/styles/tokens.ts ────────────────────────────
 const T = {
@@ -29,12 +41,13 @@ const T = {
   btnBlue:   { bg: '#3b82f6', border: '#2563eb' },
 };
 
-// ── Button sizes — circular (w-8 sm / w-12 md, like web) ─────────────────────
-const BODY_PAD  = 12;
-const INNER_PAD = 18;
-const COL_GAP   = 10;
-const BTN_D  = Math.min(44, Math.floor((SCREEN_W - BODY_PAD * 2 - INNER_PAD * 2 - COL_GAP * 2) / 3));
-const BASS_D = Math.min(44, Math.floor((SCREEN_W - BODY_PAD * 2 - INNER_PAD * 2 - COL_GAP) / 2));
+// ── Layout constants (static — do not depend on screen size) ──────────────────
+const BODY_PAD     = 12;
+const INNER_PAD    = 18;
+const COL_GAP      = 10;
+const PORT_COL_GAP   = 5;
+const PORT_INNER_PAD = 10;
+const HEADER_H     = 56;
 
 // ── Note label tables (from web ACCORDION_BUTTON_LABELS / BASS_BUTTON_LABELS) ─
 const TREBLE_LABELS: Record<number, { open: string; close: string }> = {
@@ -130,12 +143,78 @@ const BLANK: Record<number, BtnColor> = {};
 for (let k = 0; k < 43; k++) BLANK[k] = 'white';
 
 // ── Main screen ───────────────────────────────────────────────────────────────
-export default function AccordionScreen({ navigation }: any) {
+export default function AccordionScreen({ navigation, route }: any) {
+  const { songId, songName: routeSongName } = (route?.params ?? {}) as { songId?: string; songName?: string };
+  const { width: SCREEN_W, height: SCREEN_H } = useWindowDimensions();
+
+  // ── Screen-size-dependent layout values (recomputed on every resize/rotation) ──
+  const CONTENT_W    = SCREEN_W - NAV_RAIL_W;
+  const BTN_D        = Math.min(44, Math.floor((CONTENT_W - BODY_PAD * 2 - INNER_PAD * 2 - COL_GAP * 2) / 3));
+  const BASS_D       = Math.min(44, Math.floor((CONTENT_W - BODY_PAD * 2 - INNER_PAD * 2 - COL_GAP) / 2));
+  const PORT_BTN_D   = Math.min(40, Math.floor((CONTENT_W * 0.528 - PORT_INNER_PAD * 2 - PORT_COL_GAP * 2) / 3));
+  const PORT_TREBLE_W = PORT_BTN_D * 3 + PORT_COL_GAP * 2 + PORT_INNER_PAD * 2 + 4;
+  const AVAIL_H      = SCREEN_H - HEADER_H;
+  const CTRL_W       = CONTENT_W - PORT_TREBLE_W - 24;
+
+  const { songData, loading: partsLoading, error: partsError } = useSongParts(songId);
+  const activeNotesRef    = useRef<string[]>(songId ? [] : DEMO_NOTES);
+  const activeSectionsRef = useRef<typeof DEMO_SECTIONS>(songId ? [] : DEMO_SECTIONS);
+  const [activeSections, setActiveSections] = useState<typeof DEMO_SECTIONS>(songId ? [] : DEMO_SECTIONS);
+
+  const [ctrlH, setCtrlH] = useState(AVAIL_H);
   const [bellowOpen, setBellowOpen] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
   const [count, setCount] = useState(0);
   const [speed, setSpeed] = useState(DEMO_SPEED_MS);
   const [audioReady, setAudioReady] = useState(false);
+  const [sectionIdx, setSectionIdx] = useState(0);
+  const [showSectionPicker, setShowSectionPicker] = useState(false);
+  const [noteLabelMode, setNoteLabelMode] = useState(1); // 0=none, 1=show labels
+  const [manualHighlight, setManualHighlight] = useState<Record<number, BtnColor>>({});
+  const sectionIdxRef = useRef(0);
+
+  // ── Loop range markers ────────────────────────────────────────────────────────
+  const _s0len = songId ? 0 : DEMO_SECTIONS[0].end - DEMO_SECTIONS[0].start;
+  const [loopStart, setLoopStart] = useState(0);
+  const [loopEnd,   setLoopEnd]   = useState(_s0len);
+  const loopStartRef  = useRef(0);
+  const loopEndRef    = useRef(_s0len);
+  const barWidthRef   = useRef(200);
+  const startBaseRef  = useRef(0);
+  const endBaseRef    = useRef(_s0len);
+
+  const startPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder:  () => true,
+      onPanResponderGrant: () => { startBaseRef.current = loopStartRef.current; },
+      onPanResponderMove: (_, g) => {
+        const sec = activeSectionsRef.current[sectionIdxRef.current];
+        const sl  = sec.end - sec.start;
+        // rotate(-90deg) CCW: local +x → screen -y; so upward drag = increasing position
+        const delta = Math.round(-g.dy / barWidthRef.current * sl);
+        const v = Math.max(0, Math.min(loopEndRef.current - 1, startBaseRef.current + delta));
+        loopStartRef.current = v;
+        setLoopStart(v);
+      },
+    })
+  ).current;
+
+  const endPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder:  () => true,
+      onPanResponderGrant: () => { endBaseRef.current = loopEndRef.current; },
+      onPanResponderMove: (_, g) => {
+        const sec = activeSectionsRef.current[sectionIdxRef.current];
+        const sl  = sec.end - sec.start;
+        const delta = Math.round(-g.dy / barWidthRef.current * sl);
+        const v = Math.max(loopStartRef.current + 1, Math.min(sl, endBaseRef.current + delta));
+        loopEndRef.current = v;
+        setLoopEnd(v);
+      },
+    })
+  ).current;
 
   const countRef    = useRef(0);
   const speedRef    = useRef(DEMO_SPEED_MS);
@@ -165,8 +244,8 @@ export default function AccordionScreen({ navigation }: any) {
     if (btnCurrentColors.current[idx] === color) return;
     btnCurrentColors.current[idx] = color;
     const anim = btnAnimsRef.current[idx];
-    Animated.timing(anim.yellow, { toValue: color === 'yellow' ? 1 : 0, duration: 0, useNativeDriver: true }).start();
-    Animated.timing(anim.blue,   { toValue: color === 'blue'   ? 1 : 0, duration: 0, useNativeDriver: true }).start();
+    anim.yellow.setValue(color === 'yellow' ? 1 : 0);
+    anim.blue.setValue(color === 'blue'     ? 1 : 0);
   }, []);
 
   const applyAnimColors = useCallback((colorMap: Record<number, BtnColor>) => {
@@ -180,6 +259,37 @@ export default function AccordionScreen({ navigation }: any) {
   useEffect(() => {
     initAudio().then(() => setAudioReady(true));
   }, []);
+
+  useEffect(() => {
+    if (!songData) return;
+    activeNotesRef.current    = songData.notes;
+    activeSectionsRef.current = songData.sections;
+    setActiveSections(songData.sections);
+    setSpeed(songData.speedMs);
+    speedRef.current = songData.speedMs;
+    // Reset playback
+    playSession.current++;
+    if (schedulerRef.current !== null) { clearInterval(schedulerRef.current); schedulerRef.current = null; }
+    for (const t of activeTimers.current) clearTimeout(t);
+    activeTimers.current = [];
+    cancelAllScheduled();
+    stopActiveTreble();
+    setIsPlaying(false);
+    setManualHighlight({});
+    for (let k = 0; k < 43; k++) applyAnimColor(k, 'white');
+    sectionIdxRef.current = 0;
+    setSectionIdx(0);
+    countRef.current = 0;
+    setCount(0);
+    nextStepIdx.current = 0;
+    if (songData.sections.length > 0) {
+      const s0len = songData.sections[0].end - songData.sections[0].start;
+      loopStartRef.current = 0;
+      loopEndRef.current   = s0len;
+      setLoopStart(0);
+      setLoopEnd(s0len);
+    }
+  }, [songData, applyAnimColor]);
 
   // ── Lookahead step scheduler ──────────────────────────────────────────────────
   // Audio: pre-scheduled on the audio clock (runs on native audio thread).
@@ -285,12 +395,14 @@ export default function AccordionScreen({ navigation }: any) {
     sweepEndedSources();
     const lookaheadEnd = getAudioCurrentTime() + LOOKAHEAD_SEC;
     while (nextAudioTime.current < lookaheadEnd) {
-      scheduleStepAt(
-        DEMO_NOTES[nextStepIdx.current % DEMO_NOTES.length],
-        nextAudioTime.current,
-        nextStepIdx.current % DEMO_NOTES.length,
-        session,
-      );
+      const sec      = activeSectionsRef.current[sectionIdxRef.current];
+      const rStart   = loopStartRef.current;
+      const rEnd     = loopEndRef.current;
+      const rangeLen = rEnd - rStart;
+      if (rangeLen <= 0) break;
+      const offset = nextStepIdx.current % rangeLen;
+      const local  = rStart + offset;
+      scheduleStepAt(activeNotesRef.current[sec.start + local], nextAudioTime.current, local, session);
     }
   }, [scheduleStepAt]);
 
@@ -317,9 +429,14 @@ export default function AccordionScreen({ navigation }: any) {
     if (isPlaying || !audioReady) return;
     const session = ++playSession.current;
 
+    const rStart = loopStartRef.current;
+    const rEnd   = loopEndRef.current;
+    const clamped = Math.max(rStart, Math.min(rEnd - 1, countRef.current));
     nextAudioTime.current = getAudioCurrentTime() + 0.05;
-    nextStepIdx.current   = countRef.current;
+    nextStepIdx.current   = clamped - rStart;
 
+    stopActiveTreble();
+    setManualHighlight({});
     setIsPlaying(true);
     scheduleLoop(session);
     schedulerRef.current = setInterval(() => scheduleLoop(session), SCHEDULE_INTERVAL);
@@ -331,7 +448,9 @@ export default function AccordionScreen({ navigation }: any) {
     for (const t of activeTimers.current) clearTimeout(t);
     activeTimers.current = [];
     cancelAllScheduled();
+    stopActiveTreble();
     setIsPlaying(false);
+    setManualHighlight({});
     resetAllAnims();
   }, [resetAllAnims]);
 
@@ -341,7 +460,9 @@ export default function AccordionScreen({ navigation }: any) {
     for (const t of activeTimers.current) clearTimeout(t);
     activeTimers.current = [];
     cancelAllScheduled();
+    stopActiveTreble();
     setIsPlaying(false);
+    setManualHighlight({});
     resetAllAnims();
     countRef.current = 0;
     setCount(0);
@@ -353,9 +474,100 @@ export default function AccordionScreen({ navigation }: any) {
     speedRef.current = s;
   };
 
+  const changeSection = useCallback((newIdx: number) => {
+    if (isPlaying) {
+      playSession.current++;
+      if (schedulerRef.current !== null) { clearInterval(schedulerRef.current); schedulerRef.current = null; }
+      for (const t of activeTimers.current) clearTimeout(t);
+      activeTimers.current = [];
+      cancelAllScheduled();
+      stopActiveTreble();
+      setIsPlaying(false);
+      setManualHighlight({});
+      resetAllAnims();
+    }
+    sectionIdxRef.current = newIdx;
+    setSectionIdx(newIdx);
+    countRef.current = 0;
+    setCount(0);
+    nextStepIdx.current = 0;
+    const newLen = activeSectionsRef.current[newIdx].end - activeSectionsRef.current[newIdx].start;
+    loopStartRef.current = 0;
+    loopEndRef.current   = newLen;
+    setLoopStart(0);
+    setLoopEnd(newLen);
+  }, [isPlaying, resetAllAnims]);
+
+  // Plays a single step immediately (for ⏮ ⏭ manual navigation).
+  // Matches web step(i, false): treble rings until next step; bass/chord use speedRef for duration.
+  const playManualStep = useCallback((stepStr: string, displayIdx: number) => {
+    const tokens = stepStr.trim().split(' ');
+    const newColors: Record<number, BtnColor> = { ...BLANK };
+    const t0 = getAudioCurrentTime() + 0.02;
+
+    for (let j = 0; j < tokens.length - 1; j++) {
+      const tok      = tokens[j];
+      const body     = tok.split('@')[0];
+      const colonIdx = body.indexOf(':');
+      const key      = colonIdx >= 0 ? body.slice(0, colonIdx) : body;
+      const durU     = colonIdx >= 0 ? parseInt(body.slice(colonIdx + 1)) : undefined;
+      // Bass/chord duration matches web: (durUnits / 6) * speed, default 1500ms
+      const kDurMs   = durU !== undefined
+        ? Math.min(1500, Math.max(50, (durU / 6) * speedRef.current))
+        : 1500;
+
+      if (key.startsWith('abc')) {
+        const m = key.match(/abc_?(\d+)/);
+        if (m) {
+          const c = ACID_CHORD[parseInt(m[1])];
+          if (c) { scheduleChordAt(c.chordFile, t0, kDurMs / 1000); newColors[30 + c.value] = parseInt(m[1]) % 2 === 0 ? 'blue' : 'yellow'; }
+        }
+      } else if (key.startsWith('abn')) {
+        const entry = BASS_NOTE_KEY[key];
+        if (entry) { scheduleBassAt(entry.note, t0, kDurMs / 1000); newColors[30 + entry.value] = 'blue'; }
+      } else if (isTrebleKey(key)) {
+        // Treble rings indefinitely until next step (web: playTrebleNote without duration, stopped by stopActiveTrebleNotes at next step)
+        playTrebleKeyManual(key);
+        const btnIdx = KEY_TO_BTN[key];
+        if (btnIdx !== undefined) newColors[btnIdx] = KEY_DIR[key] === 'open' ? 'yellow' : 'blue';
+      }
+    }
+
+    // Build highlight map with only non-white entries (React state — persists across re-renders like web's colorBoton)
+    const highlight: Record<number, BtnColor> = {};
+    for (const [k, v] of Object.entries(newColors)) {
+      if (v !== 'white') highlight[Number(k)] = v;
+    }
+    // resetAllAnims clears any stuck animated highlights; state replaces old position with new atomically
+    resetAllAnims();
+    countRef.current = displayIdx;
+    setCount(displayIdx);
+    setManualHighlight(highlight);
+  }, [resetAllAnims]);
+
+  const stepPrev = useCallback(() => {
+    if (isPlaying) return;
+    const rStart = loopStartRef.current;
+    const idx    = Math.max(rStart, countRef.current - 1);
+    countRef.current = idx;
+    nextStepIdx.current = idx - rStart;
+    const sec = activeSectionsRef.current[sectionIdxRef.current];
+    playManualStep(activeNotesRef.current[sec.start + idx], idx);
+  }, [isPlaying, playManualStep]);
+
+  const stepNext = useCallback(() => {
+    if (isPlaying) return;
+    const rEnd = loopEndRef.current;
+    const idx  = Math.min(rEnd - 1, countRef.current + 1);
+    countRef.current = idx;
+    nextStepIdx.current = idx - loopStartRef.current;
+    const sec = activeSectionsRef.current[sectionIdxRef.current];
+    playManualStep(activeNotesRef.current[sec.start + idx], idx);
+  }, [isPlaying, playManualStep]);
+
   // ── Render treble button ──────────────────────────────────────────────────────
   // Color overlays run on the native UI thread via Animated — no React re-render.
-  const renderPito = (idx: number) => {
+  const renderPito = (idx: number, btnSize = BTN_D) => {
     const { yellow, blue } = btnAnimsRef.current[idx];
     const lbl = TREBLE_LABELS[idx];
     return (
@@ -364,19 +576,29 @@ export default function AccordionScreen({ navigation }: any) {
         onPress={() => onPressBtn(idx)}
         activeOpacity={0.7}
         style={[s.btn, {
-          width: BTN_D, height: BTN_D, borderRadius: BTN_D / 2,
+          width: btnSize, height: btnSize, borderRadius: btnSize / 2,
           backgroundColor: T.btnWhite.bg, borderColor: T.btnWhite.border,
           overflow: 'hidden',
         }]}
       >
         <Animated.View style={[s.btnOverlay, { backgroundColor: T.btnYellow.bg, opacity: yellow }]} />
         <Animated.View style={[s.btnOverlay, { backgroundColor: T.btnBlue.bg,   opacity: blue   }]} />
-        {lbl && (
-          <View style={s.lblWrap} pointerEvents="none">
-            <Text style={[s.lbl, { color: T.labelOpen,  fontSize: BTN_D < 36 ? 7 : 9 }]}>{lbl.open}</Text>
-            <Text style={[s.lbl, { color: T.labelClose, fontSize: BTN_D < 36 ? 7 : 9 }]}>{lbl.close}</Text>
-          </View>
+        {manualHighlight[idx] && (
+          <View style={[s.btnOverlay, { backgroundColor: manualHighlight[idx] === 'yellow' ? T.btnYellow.bg : T.btnBlue.bg }]} pointerEvents="none" />
         )}
+        {noteLabelMode > 0 && (() => {
+          const fs = Math.max(8, Math.round(btnSize * 0.28));
+          const pitoKey = PITO_KEY[idx];
+          const lo = noteLabelMode === 3 ? pitoKey?.open  : getLabel(lbl?.open,  noteLabelMode);
+          const lc = noteLabelMode === 3 ? pitoKey?.close : getLabel(lbl?.close, noteLabelMode);
+          if (!lo && !lc) return null;
+          return (
+            <View style={s.lblWrap} pointerEvents="none">
+              {lo && <Text style={[s.lbl, { color: T.labelOpen,  fontSize: fs, lineHeight: fs + 2 }]}>{lo}</Text>}
+              {lc && <Text style={[s.lbl, { color: T.labelClose, fontSize: fs, lineHeight: fs + 2 }]}>{lc}</Text>}
+            </View>
+          );
+        })()}
       </TouchableOpacity>
     );
   };
@@ -398,6 +620,9 @@ export default function AccordionScreen({ navigation }: any) {
       >
         <Animated.View style={[s.btnOverlay, { backgroundColor: T.btnYellow.bg, opacity: yellow }]} />
         <Animated.View style={[s.btnOverlay, { backgroundColor: T.btnBlue.bg,   opacity: blue   }]} />
+        {manualHighlight[30 + value] && (
+          <View style={[s.btnOverlay, { backgroundColor: manualHighlight[30 + value] === 'yellow' ? T.btnYellow.bg : T.btnBlue.bg }]} pointerEvents="none" />
+        )}
         {lbl && (
           <View style={s.lblWrap} pointerEvents="none">
             <Text style={[s.lbl, { color: T.labelOpen,  fontSize: 7 }]}>{lbl.open}</Text>
@@ -408,121 +633,329 @@ export default function AccordionScreen({ navigation }: any) {
     );
   };
 
+  const currentSec = activeSections[sectionIdx] ?? activeSections[0];
+  const secLen = currentSec ? currentSec.end - currentSec.start : 0;
+  const pct = secLen > 0 ? count / secLen : 0;
+
   return (
-    <View style={s.root}>
-      <AppHeader navigation={navigation} />
+    <ScreenLayout navigation={navigation} activeKey="Accordion" contentStyle={{ backgroundColor: '#f9fafb' }}>
 
-      {/* Transport */}
-      <View style={s.transport}>
-        <TouchableOpacity style={[s.bellowBtn, bellowOpen  && s.bellowOpen]}  onPress={() => setBellowOpen(true)}  activeOpacity={0.8}>
-          <Text style={[s.bellowTxt, bellowOpen  && s.bellowOpenTxt]}>↔</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[s.bellowBtn, !bellowOpen && s.bellowClose]} onPress={() => setBellowOpen(false)} activeOpacity={0.8}>
-          <Text style={[s.bellowTxt, !bellowOpen && s.bellowCloseTxt]}>↕</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={s.speedBtn} onPress={() => adjustSpeed(50)}  activeOpacity={0.8}><Text style={s.speedTxt}>−</Text></TouchableOpacity>
-        <Text style={s.speedVal}>{speed}ms</Text>
-        <TouchableOpacity style={s.speedBtn} onPress={() => adjustSpeed(-50)} activeOpacity={0.8}><Text style={s.speedTxt}>+</Text></TouchableOpacity>
-
-        <TouchableOpacity
-          style={[s.playBtn, isPlaying && s.stopBtn, !audioReady && { opacity: 0.4 }]}
-          onPress={isPlaying ? stopPlay : startPlay}
-          disabled={!audioReady}
-          activeOpacity={0.8}
-        >
-          <Text style={s.playTxt}>{isPlaying ? '■' : '▶'}</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={s.resetBtn} onPress={resetSong} activeOpacity={0.8}>
-          <Text style={s.resetTxt}>⏮</Text>
-        </TouchableOpacity>
-
-        <Text style={s.counter}>{count}/{DEMO_NOTES.length}</Text>
+      {/* ── Título de la canción ── */}
+      <View style={s.titleBar}>
+        <Text style={s.titleTxt} numberOfLines={1}>{routeSongName ?? DEMO_NAME}</Text>
       </View>
 
-      <ScrollView contentContainerStyle={s.body} showsVerticalScrollIndicator={false}>
+      {/* Error loading song parts */}
+      {partsError && !partsLoading && (
+        <View style={s.errorBar}>
+          <Text style={s.errorTxt}>⚠ {partsError}</Text>
+        </View>
+      )}
 
-        {/* ══ TREBLE ══ */}
-        <LinearGradient colors={T.trebleGrad} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={s.instrBody}>
-          <View style={s.grillTop} pointerEvents="none" />
-          <View style={s.grillBot} pointerEvents="none" />
-          <View style={s.sheen}    pointerEvents="none" />
-          <Text style={[s.sectionLbl, { color: T.colHeaderT }]}>{DEMO_NAME} · TREBLE</Text>
+      {/* Loading overlay while fetching song parts */}
+      {partsLoading && (
+        <View style={s.loadingOverlay}>
+          <ActivityIndicator size="large" color="#7c3aed" />
+          <Text style={s.loadingTxt}>Cargando canción...</Text>
+        </View>
+      )}
+
+      {/* ── Portrait: teclado izquierda + controles derecha (web portrait) ── */}
+      <View style={[s.main, (partsLoading || (!songData && !!songId)) && { opacity: 0.3 }]}>
+
+        {/* ── IZQUIERDA: Teclado treble compacto ─────────────────────────── */}
+        <LinearGradient colors={T.trebleGrad} start={{ x: 0.3, y: 0 }} end={{ x: 0.7, y: 1 }} style={[s.trebleBody, { width: PORT_TREBLE_W }]}>
+          {/* Fuelles — rayas verticales cada 30px */}
+          {([28, 58, 88, 118] as const).map(l => (
+            <React.Fragment key={l}>
+              <View style={[s.foldDark,  { left: l }]} pointerEvents="none" />
+              <View style={[s.foldLight, { left: l + 2 }]} pointerEvents="none" />
+            </React.Fragment>
+          ))}
+          {/* Grille superior e inferior con gradiente */}
+          <LinearGradient colors={['rgba(0,0,0,0.55)', 'transparent']} style={s.grillTop} pointerEvents="none" />
+          <LinearGradient colors={['transparent', 'rgba(0,0,0,0.55)']} style={s.grillBot} pointerEvents="none" />
+          {/* Brillo superior */}
+          <LinearGradient colors={['rgba(255,255,255,0.10)', 'transparent']} style={s.sheen} pointerEvents="none" />
           <View style={s.colsRow}>
             {([{ label: 'I', btns: COL_I }, { label: 'II', btns: COL_II }, { label: 'III', btns: COL_III }] as const).map(col => (
-              <View key={col.label} style={[s.col, { width: BTN_D }]}>
-                <Text style={[s.colHdr, { color: T.colHeaderT }]}>{col.label}</Text>
-                {col.btns.map(renderPito)}
+              <View key={col.label} style={[s.col, { width: PORT_BTN_D }]}>
+                <Text style={s.colHdr}>{col.label}</Text>
+                {col.btns.map(i => renderPito(i, PORT_BTN_D))}
               </View>
             ))}
           </View>
         </LinearGradient>
 
-        {/* ══ BASS ══ */}
-        <LinearGradient colors={T.bassGrad} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={[s.instrBody, s.bassBody]}>
-          <View style={[s.grillTop, { borderTopLeftRadius: 14, borderTopRightRadius: 14 }]}    pointerEvents="none" />
-          <View style={[s.grillBot, { borderBottomLeftRadius: 14, borderBottomRightRadius: 14 }]} pointerEvents="none" />
-          <View style={[s.sheen,    { borderTopLeftRadius: 14, borderTopRightRadius: 14 }]}    pointerEvents="none" />
-          <Text style={[s.sectionLbl, { color: T.colHeaderB }]}>BASS</Text>
-          <View style={s.colsRow}>
-            {([{ label: 'I', btns: BASS_L }, { label: 'II', btns: BASS_R }] as const).map(col => (
-              <View key={col.label} style={[s.col, { width: BASS_D }]}>
-                <Text style={[s.colHdr, { color: T.colHeaderB }]}>{col.label}</Text>
-                {col.btns.map(renderBass)}
+        {/* ── DERECHA: Panel de controles, rotado -90° (igual que web portrait) ── */}
+        <View style={s.ctrlContainer} onLayout={(e) => setCtrlH(e.nativeEvent.layout.height)}>
+          <View style={[s.ctrlInner, {
+            width: ctrlH, height: CTRL_W,
+            top:  (ctrlH - CTRL_W) / 2,
+            left: (CTRL_W - ctrlH) / 2,
+            transform: [{ rotate: '-90deg' }],
+          }]}>
+
+            {/* Fila 1: Sección + Reproducción + Velocidad */}
+            <View style={s.ctrlRow}>
+              {/* Navegación de secciones */}
+              <TouchableOpacity
+                style={[s.btnSecNav, sectionIdx === 0 && s.btnSecNavDisabled]}
+                onPress={() => changeSection(sectionIdx - 1)}
+                disabled={sectionIdx === 0}
+                activeOpacity={0.7}
+              >
+                <Text style={[s.btnSecNavTxt, sectionIdx === 0 && s.btnSecNavTxtDis]}>◀</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={s.sectionSelect} onPress={() => setShowSectionPicker(true)} activeOpacity={0.8} disabled={!currentSec}>
+                <Text style={s.sectionSelectTxt} numberOfLines={1}>{currentSec?.name ?? '—'}</Text>
+                <Text style={s.sectionSelectChevron}>▾</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.btnSecNav, sectionIdx === activeSections.length - 1 && s.btnSecNavDisabled]}
+                onPress={() => changeSection(sectionIdx + 1)}
+                disabled={sectionIdx === activeSections.length - 1}
+                activeOpacity={0.7}
+              >
+                <Text style={[s.btnSecNavTxt, sectionIdx === activeSections.length - 1 && s.btnSecNavTxtDis]}>▶</Text>
+              </TouchableOpacity>
+
+              <View style={s.vertDivider} />
+
+              {/* Reproducción */}
+              <View style={s.playbackGroup}>
+                <TouchableOpacity style={[s.btnBlue, isPlaying && s.btnGray]} onPress={stepPrev} disabled={isPlaying} activeOpacity={0.8}>
+                  <Text style={s.btnTxt}>⏮</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[s.btnPlayLg, s.btnPlayGo, (isPlaying || !audioReady) && s.btnGray]}
+                  onPress={startPlay} disabled={isPlaying || !audioReady} activeOpacity={0.8}
+                >
+                  <Text style={s.btnPlayTxt}>▶</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[s.btnPlayLg, s.btnPlayStop]}
+                  onPress={stopPlay} disabled={!isPlaying} activeOpacity={0.8}
+                >
+                  <Text style={s.btnPlayTxt}>■</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.btnBlue, isPlaying && s.btnGray]} onPress={stepNext} disabled={isPlaying} activeOpacity={0.8}>
+                  <Text style={s.btnTxt}>⏭</Text>
+                </TouchableOpacity>
               </View>
+
+              <View style={s.vertDivider} />
+
+              {/* Velocidad */}
+              <View style={s.playbackGroup}>
+                <TouchableOpacity style={s.btnRed} onPress={() => adjustSpeed(50)} activeOpacity={0.8}>
+                  <Text style={s.btnTxt}>−</Text>
+                </TouchableOpacity>
+                <View style={s.speedCenter}>
+                  <Text style={s.speedVal}>{speed}ms</Text>
+                  <Text style={s.speedLbl}>{speed <= 150 ? 'rápido' : speed <= 300 ? 'normal' : 'lento'}</Text>
+                </View>
+                <TouchableOpacity style={s.btnGreen} onPress={() => adjustSpeed(-50)} activeOpacity={0.8}>
+                  <Text style={s.btnTxt}>+</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Fila 2: Leyendas + Fuelle + Reset + Barra de progreso */}
+            <View style={s.ctrlRow2}>
+              <TouchableOpacity
+                style={[s.btnReset, noteLabelMode > 0 && s.btnNoteActive]}
+                onPress={() => setNoteLabelMode(m => (m + 1) % 4)}
+                activeOpacity={0.8}
+              >
+                <Text style={[s.btnResetTxt, noteLabelMode > 0 && { color: '#4f46e5' }]}>🎵</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.bellowBtn, bellowOpen && s.bellowOpenActive]} onPress={() => setBellowOpen(true)} activeOpacity={0.8}>
+                <Text style={[s.bellowTxt, { color: bellowOpen ? '#78350f' : '#6b7280' }]}>↔</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.bellowBtn, !bellowOpen && s.bellowCloseActive]} onPress={() => setBellowOpen(false)} activeOpacity={0.8}>
+                <Text style={[s.bellowTxt, { color: !bellowOpen ? '#1e3a8a' : '#6b7280' }]}>↕</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={s.btnReset} onPress={resetSong} activeOpacity={0.8}>
+                <Text style={s.btnResetTxt}>↺</Text>
+              </TouchableOpacity>
+              <View
+                style={s.progressTrack}
+                onLayout={e => { barWidthRef.current = e.nativeEvent.layout.width; }}
+              >
+                {/* Rango activo (naranja) */}
+                <View style={[s.loopRange, {
+                  left:  `${(loopStart / secLen) * 100}%` as any,
+                  right: `${((secLen - loopEnd) / secLen) * 100}%` as any,
+                }]} />
+                {/* Relleno de progreso — arranca en loopStart, crece hasta count */}
+                <View style={[s.progressDone, {
+                  left:  `${(loopStart / secLen) * 100}%` as any,
+                  width: `${(Math.max(0, count - loopStart) / secLen) * 100}%` as any,
+                }]} />
+                {/* Contador centrado */}
+                <Text style={s.counter}>{count}/{secLen}</Text>
+                {/* Marcador inicio — bloque sólido naranja con esquinas izquierdas redondeadas */}
+                <View
+                  style={[s.markerStartHandle, { left: `${(loopStart / secLen) * 100}%` as any }]}
+                  {...startPan.panHandlers}
+                >
+                  <View style={s.markerBlockStart}>
+                    <Text style={s.markerLbl}>{loopStart}</Text>
+                    <Text style={s.markerSymbol}>⌐</Text>
+                  </View>
+                </View>
+                {/* Marcador fin — bloque sólido naranja con esquinas derechas redondeadas */}
+                <View
+                  style={[s.markerEndHandle, { left: `${(loopEnd / secLen) * 100}%` as any }]}
+                  {...endPan.panHandlers}
+                >
+                  <View style={s.markerBlockEnd}>
+                    <Text style={s.markerLbl}>{loopEnd}</Text>
+                    <Text style={s.markerSymbol}>¬</Text>
+                  </View>
+                </View>
+              </View>
+            </View>
+
+          </View>
+        </View>
+
+      </View>
+
+      {/* Modal selector de sección */}
+      <Modal visible={showSectionPicker} transparent animationType="fade" onRequestClose={() => setShowSectionPicker(false)}>
+        <TouchableOpacity style={s.modalBackdrop} activeOpacity={1} onPress={() => setShowSectionPicker(false)}>
+          <View style={s.modalCard}>
+            <Text style={s.modalTitle}>Seleccionar sección</Text>
+            {activeSections.map((sec, i) => (
+              <TouchableOpacity
+                key={sec.id}
+                style={[s.modalItem, i === sectionIdx && s.modalItemActive]}
+                onPress={() => { changeSection(i); setShowSectionPicker(false); }}
+                activeOpacity={0.7}
+              >
+                <Text style={[s.modalItemTxt, i === sectionIdx && s.modalItemActiveTxt]}>{sec.name}</Text>
+              </TouchableOpacity>
             ))}
           </View>
-        </LinearGradient>
+        </TouchableOpacity>
+      </Modal>
 
-        <View style={{ height: 30 }} />
-      </ScrollView>
-
-      <SideDrawer navigation={navigation} />
-    </View>
+    </ScreenLayout>
   );
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0a0a0a' },
+  // Título
+  titleBar: { paddingHorizontal: 14, paddingVertical: 10 },
+  titleTxt:  { fontSize: 18, fontWeight: '700', color: '#111827', textAlign: 'center', letterSpacing: 0.3 },
 
-  transport: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 12, paddingVertical: 8,
-    backgroundColor: '#161616', borderBottomWidth: 1, borderBottomColor: '#2a2a2a',
+  // Layout portrait
+  main: { flex: 1, flexDirection: 'row', padding: 8, gap: 8 },
+
+  // ── Teclado treble (izquierda, gradiente oscuro del instrumento) ──────────
+  trebleBody: {
+    borderRadius: 18,
+    paddingVertical: 14, paddingHorizontal: PORT_INNER_PAD,
+    overflow: 'hidden', alignSelf: 'center',
+    borderWidth: 2, borderColor: '#3a0000',
+    shadowColor: '#000', shadowOpacity: 0.7, shadowRadius: 24, shadowOffset: { width: 0, height: 8 }, elevation: 16,
   },
-  bellowBtn:    { width: 40, height: 34, borderRadius: 8, borderWidth: 1.5, borderColor: '#444', backgroundColor: '#222', justifyContent: 'center', alignItems: 'center' },
-  bellowOpen:   { backgroundColor: '#f97316', borderColor: '#ea580c' },
-  bellowClose:  { backgroundColor: '#3b82f6', borderColor: '#2563eb' },
-  bellowTxt:    { fontSize: 16, color: '#666' },
-  bellowOpenTxt: { color: '#78350f' },
-  bellowCloseTxt:{ color: '#eff6ff' },
-  speedBtn:    { width: 30, height: 30, borderRadius: 6, backgroundColor: '#333', justifyContent: 'center', alignItems: 'center' },
-  speedTxt:    { fontSize: 16, color: '#ccc', fontWeight: '700' },
-  speedVal:    { fontSize: 11, color: '#888', minWidth: 44, textAlign: 'center' },
-  playBtn:     { width: 38, height: 34, borderRadius: 8, backgroundColor: '#16a34a', justifyContent: 'center', alignItems: 'center' },
-  stopBtn:     { backgroundColor: '#b91c1c' },
-  playTxt:     { fontSize: 14, color: '#fff' },
-  resetBtn:    { width: 34, height: 34, borderRadius: 8, backgroundColor: '#374151', justifyContent: 'center', alignItems: 'center' },
-  resetTxt:    { fontSize: 14, color: '#9ca3af' },
-  counter:     { fontSize: 10, color: '#555', marginLeft: 4 },
+  grillTop:  { position: 'absolute', top: 0, left: 0, right: 0, height: 18, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
+  grillBot:  { position: 'absolute', bottom: 0, left: 0, right: 0, height: 18, borderBottomLeftRadius: 16, borderBottomRightRadius: 16 },
+  sheen:     { position: 'absolute', top: 0, left: 0, right: 0, height: '45%', borderTopLeftRadius: 16, borderTopRightRadius: 16 },
+  foldDark:  { position: 'absolute', top: 0, bottom: 0, width: 2, backgroundColor: 'rgba(0,0,0,0.22)' },
+  foldLight: { position: 'absolute', top: 0, bottom: 0, width: 2, backgroundColor: 'rgba(255,255,255,0.04)' },
+  colsRow:   { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: PORT_COL_GAP },
+  col:       { alignItems: 'center', gap: 4 },
+  colHdr:    { fontSize: 9, fontWeight: '600', letterSpacing: 1, color: 'rgba(255,200,150,0.75)', marginBottom: 3, textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
 
-  body:        { padding: BODY_PAD, gap: 10 },
-  instrBody:   { borderRadius: 18, paddingVertical: 16, paddingHorizontal: INNER_PAD, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.7, shadowRadius: 16, elevation: 12 },
-  bassBody:    { borderRadius: 14 },
+  // Botones del teclado treble
+  btn:        { borderWidth: 1.5, justifyContent: 'center', alignItems: 'center', shadowOffset: { width: 0, height: 1 } },
+  btnOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  lblWrap:    { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center' },
+  lbl:        { fontWeight: '700', letterSpacing: 0.3, textShadowColor: 'rgba(0,0,0,0.95)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
 
-  grillTop:    { position: 'absolute', top: 0, left: 0, right: 0, height: 12, backgroundColor: 'rgba(0,0,0,0.45)', borderTopLeftRadius: 18, borderTopRightRadius: 18 },
-  grillBot:    { position: 'absolute', bottom: 0, left: 0, right: 0, height: 12, backgroundColor: 'rgba(0,0,0,0.45)', borderBottomLeftRadius: 18, borderBottomRightRadius: 18 },
-  sheen:       { position: 'absolute', top: 0, left: 0, right: 0, height: '40%', backgroundColor: 'rgba(255,255,255,0.06)', borderTopLeftRadius: 18, borderTopRightRadius: 18 },
+  // ── Panel de controles rotado -90° (derecha, igual que web portrait) ─────
+  ctrlContainer: {
+    flex: 1, overflow: 'hidden',
+  },
+  ctrlInner: {
+    position: 'absolute',
+    flexDirection: 'column', justifyContent: 'center', gap: 10,
+    paddingHorizontal: 14, paddingVertical: 8,
+  },
+  ctrlRow:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  playbackGroup: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  ctrlRow2: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  vertDivider:   { width: 1, height: 32, backgroundColor: '#e5e7eb', marginHorizontal: 2 },
+  // Botones de navegación de sección — idénticos a la web (p-1.5 rounded-lg bg-gray-200)
+  btnSecNav:         { paddingHorizontal: 6, paddingVertical: 6, borderRadius: 8, backgroundColor: '#e5e7eb', justifyContent: 'center', alignItems: 'center' },
+  btnSecNavDisabled: { opacity: 0.5, borderWidth: 1, borderColor: '#d1d5db' },
+  btnSecNavTxt:      { fontSize: 13, color: '#374151', fontWeight: '600' },
+  btnSecNavTxtDis:   { color: '#9ca3af' },
 
-  sectionLbl:  { fontSize: 9, fontWeight: '700', letterSpacing: 2, textAlign: 'center', marginBottom: 10, textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
-  colsRow:     { flexDirection: 'row', justifyContent: 'center', gap: COL_GAP },
-  col:         { alignItems: 'center', gap: 5 },
-  colHdr:      { fontSize: 10, fontWeight: '600', letterSpacing: 1, marginBottom: 4, textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
+  // Selector de sección (dropdown)
+  sectionSelect:        { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#d1d5db', backgroundColor: '#fff', minWidth: 90, maxWidth: 140, gap: 3 },
+  sectionSelectTxt:     { fontSize: 11, fontWeight: '700', color: '#111827', flex: 1, textAlign: 'center' },
+  sectionSelectChevron: { fontSize: 10, color: '#6b7280' },
 
-  btn:         { borderWidth: 2, justifyContent: 'center', alignItems: 'center', shadowOffset: { width: 0, height: 2 } },
-  btnOverlay:  { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
-  lblWrap:     { position: 'absolute', bottom: 1, left: 0, right: 0, alignItems: 'center' },
-  lbl:         { fontWeight: '700', letterSpacing: 0.3, lineHeight: 10, textShadowColor: 'rgba(0,0,0,0.95)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
+  // Fuelle
+  bellowBtn:       { width: 40, height: 34, borderRadius: 8, borderWidth: 1.5, borderColor: '#d1d5db', backgroundColor: '#f3f4f6', justifyContent: 'center', alignItems: 'center' },
+  bellowOpenActive:  { backgroundColor: '#facc15', borderColor: '#d97706' },
+  bellowCloseActive: { backgroundColor: '#60a5fa', borderColor: '#3b82f6' },
+  bellowTxt:       { fontSize: 16, fontWeight: '700' },
+
+  // Botones de velocidad y navegación (32px)
+  btnGreen:  { width: 32, height: 32, borderRadius: 8, backgroundColor: '#16a34a', borderWidth: 1, borderColor: '#15803d', justifyContent: 'center', alignItems: 'center' },
+  btnRed:    { width: 32, height: 32, borderRadius: 8, backgroundColor: '#dc2626', borderWidth: 1, borderColor: '#b91c1c', justifyContent: 'center', alignItems: 'center' },
+  btnBlue:   { width: 36, height: 36, borderRadius: 8, backgroundColor: '#2563eb', borderWidth: 1, borderColor: '#1d4ed8', justifyContent: 'center', alignItems: 'center' },
+  btnGray:   { backgroundColor: '#d1d5db', borderColor: '#9ca3af' },
+  btnTxt:    { fontSize: 15, color: '#fff', fontWeight: '700' },
+
+  // Velocidad
+  speedCenter: { alignItems: 'center', minWidth: 52 },
+  speedVal:    { fontSize: 12, fontWeight: '700', color: '#111827' },
+  speedLbl:    { fontSize: 9, color: '#6b7280' },
+
+  // Play / Stop (36px rectangular, como web)
+  btnPlayLg:   { width: 36, height: 36, borderRadius: 8, justifyContent: 'center', alignItems: 'center', elevation: 3, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 4, shadowOffset: { width: 0, height: 2 } },
+  btnPlayGo:   { backgroundColor: '#16a34a', borderWidth: 1.5, borderColor: '#15803d' },
+  btnPlayStop: { backgroundColor: '#dc2626', borderWidth: 1.5, borderColor: '#b91c1c' },
+  btnPlayTxt:  { fontSize: 18, color: '#fff' },
+
+  // Reiniciar / Leyendas
+  btnReset:      { width: 36, height: 36, borderRadius: 8, backgroundColor: '#f3f4f6', borderWidth: 1, borderColor: '#e5e7eb', justifyContent: 'center', alignItems: 'center' },
+  btnResetTxt:   { fontSize: 16, color: '#4b5563' },
+  btnNoteActive: { backgroundColor: '#ede9fe', borderColor: '#a78bfa' },
+
+  // Progreso
+  progressTrack: { flex: 1, height: 26, backgroundColor: '#e5e7eb', borderRadius: 4, overflow: 'visible' },
+  loopRange:     { position: 'absolute', top: 0, bottom: 0, backgroundColor: 'rgba(249,115,22,0.22)', borderRadius: 3 },
+  progressDone:  { position: 'absolute', top: 0, bottom: 0, backgroundColor: '#3b82f6', borderRadius: 4 },
+  counter:       { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, textAlign: 'center', textAlignVertical: 'center', fontSize: 9, color: '#374151', fontWeight: '700' },
+  // Marcadores — bloques sólidos naranja como en la web (w-5 h-9 bg-orange-500)
+  markerStartHandle: { position: 'absolute', top: -3, bottom: -3, width: 24, zIndex: 10 },
+  markerEndHandle:   { position: 'absolute', top: -3, bottom: -3, width: 24, marginLeft: -24, zIndex: 10 },
+  markerBlockStart:  { position: 'absolute', left: 0, top: 0, bottom: 0, width: 16, backgroundColor: '#f97316', borderTopLeftRadius: 3, borderBottomLeftRadius: 3, alignItems: 'center', justifyContent: 'center' },
+  markerBlockEnd:    { position: 'absolute', right: 0, top: 0, bottom: 0, width: 16, backgroundColor: '#f97316', borderTopRightRadius: 3, borderBottomRightRadius: 3, alignItems: 'center', justifyContent: 'center' },
+  markerLbl:         { fontSize: 6, color: '#fff', fontWeight: '800', lineHeight: 7, marginBottom: 1 },
+  markerSymbol:      { fontSize: 10, color: '#fff', fontWeight: '900', lineHeight: 11 },
+
+  // Loading / error
+  loadingOverlay: { position: 'absolute', top: 56, left: 0, right: 0, bottom: 0, zIndex: 10, justifyContent: 'center', alignItems: 'center', gap: 12 },
+  loadingTxt:     { fontSize: 14, color: '#6b7280', fontWeight: '600' },
+  errorBar:       { marginHorizontal: 14, marginBottom: 6, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: '#fef2f2', borderRadius: 8, borderWidth: 1, borderColor: '#fecaca' },
+  errorTxt:       { fontSize: 12, color: '#dc2626', fontWeight: '600' },
+
+  // Modal selector de sección
+  modalBackdrop:     { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
+  modalCard:         { backgroundColor: '#fff', borderRadius: 14, paddingVertical: 8, paddingHorizontal: 4, minWidth: 180, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 10 },
+  modalTitle:        { fontSize: 12, fontWeight: '700', color: '#6b7280', textAlign: 'center', paddingVertical: 8, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: '#f3f4f6', marginBottom: 4 },
+  modalItem:         { paddingVertical: 12, paddingHorizontal: 20, borderRadius: 8, marginHorizontal: 4 },
+  modalItemActive:   { backgroundColor: '#eff6ff' },
+  modalItemTxt:      { fontSize: 15, color: '#111827', fontWeight: '500' },
+  modalItemActiveTxt:{ color: '#2563eb', fontWeight: '700' },
 });

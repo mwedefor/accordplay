@@ -74,6 +74,30 @@ function SongThumbnail({ song }: { song: Song }) {
   );
 }
 
+// ── Acoustic guitar icon (View-based, no react-native-svg) ───────────────────
+function AcousticGuitarIcon({ size }: { size: number }) {
+  const sc = size / 24;
+  const C = '#92400e';
+  const dark = '#5c2d0a';
+  // total stacked height ≈ 23 × sc < size → fits; justifyContent centers within the box
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center',
+                   overflow: 'visible', transform: [{ rotate: '35deg' }] }}>
+      <View style={{ width: 6 * sc, height: 2.5 * sc,
+                     borderRadius: 1.5 * sc, backgroundColor: dark }} />
+      <View style={{ width: 3.5 * sc, height: 5.5 * sc, backgroundColor: C }} />
+      <View style={{ marginTop: -1 * sc, width: 10 * sc, height: 6 * sc,
+                     borderRadius: 5 * sc, backgroundColor: C }} />
+      <View style={{ width: 6.5 * sc, height: 2 * sc, backgroundColor: C }} />
+      <View style={{ width: 12 * sc, height: 8 * sc, borderRadius: 6 * sc,
+                     backgroundColor: C, alignItems: 'center', justifyContent: 'center' }}>
+        <View style={{ width: 3.5 * sc, height: 3.5 * sc, borderRadius: 2 * sc,
+                       backgroundColor: 'rgba(0,0,0,0.35)' }} />
+      </View>
+    </View>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 const BANNER_INSTRUMENTS = [
   { label: 'Acordeón', emoji: '🪗', screen: 'Accordion', tab: null },
@@ -175,9 +199,13 @@ export default function HomeScreen({ navigation }: any) {
                   }}
                   activeOpacity={0.8}
                 >
-                  <Text style={[styles.bannerBtnEmoji, { fontSize: btnSize * 0.48 }]}>
-                    {b.emoji}
-                  </Text>
+                  {b.label === 'Guitarra' ? (
+                    <AcousticGuitarIcon size={btnSize * 0.55} />
+                  ) : (
+                    <Text style={[styles.bannerBtnEmoji, { fontSize: btnSize * 0.48 }]}>
+                      {b.emoji}
+                    </Text>
+                  )}
                 </TouchableOpacity>
               ))}
             </View>

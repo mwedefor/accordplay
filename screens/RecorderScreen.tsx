@@ -452,7 +452,7 @@ export default function RecorderScreen({ navigation, route }: any) {
       <View style={[s.main, (partsLoading || (!songData && !!songId)) && { opacity: 0.3 }]}>
 
         {/* IZQUIERDA — diagrama + barra naranja, centrados verticalmente respecto al alto del panel derecho */}
-        <View style={{ width: DIAG_W, flexDirection: 'column', alignItems: 'center', alignSelf: 'center', marginLeft: 16 }}>
+        <View style={{ width: DIAG_W, flexDirection: 'column', alignItems: 'center', alignSelf: 'center', marginLeft: 30 }}>
           <FingeringDiagram fingering={fingering} diagH={DIAG_H} />
           {/* Barra naranja con marcadores en los extremos */}
           <View style={[s.noteStrip, { width: DIAG_W, height: NOTE_H }]}>

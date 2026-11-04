@@ -3,8 +3,9 @@ import ScreenLayout from '../components/ScreenLayout';
 import SongsGrid from '../components/SongsGrid';
 import { useSongs } from '../hooks/useSongs';
 
-export default function SongsPage({ navigation }: { navigation: any }) {
+export default function SongsPage({ navigation, route }: { navigation: any; route: any }) {
   const { songs, loading, error, refresh } = useSongs();
+  const initialTab = route?.params?.initialTab;
 
   return (
     <ScreenLayout navigation={navigation} activeKey="Library">
@@ -14,6 +15,7 @@ export default function SongsPage({ navigation }: { navigation: any }) {
         error={error}
         onRefresh={refresh}
         navigation={navigation}
+        initialTab={initialTab}
       />
     </ScreenLayout>
   );

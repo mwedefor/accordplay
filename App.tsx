@@ -12,6 +12,7 @@ import HomeScreen         from './screens/HomeScreen';
 import AccordionScreen    from './screens/AccordionScreen';
 import PianoScreen        from './screens/PianoScreen';
 import SongsPage          from './screens/SongsPage';
+import RecorderScreen     from './screens/RecorderScreen';
 import SubscriptionScreen from './screens/SubscriptionScreen';
 
 const Stack = createNativeStackNavigator();
@@ -37,6 +38,7 @@ function RootNavigator() {
           <Stack.Screen name="Accordion"    component={AccordionScreen} />
           <Stack.Screen name="Piano"        component={PianoScreen} />
           <Stack.Screen name="Songs"        component={SongsPage} />
+          <Stack.Screen name="Recorder"     component={RecorderScreen} />
           <Stack.Screen name="Subscription" component={SubscriptionScreen} />
         </>
       )}

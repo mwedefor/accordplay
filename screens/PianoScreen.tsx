@@ -17,7 +17,9 @@ import { useSongParts } from '../hooks/useSongParts';
 function parsePianoStep(step: string): { noteCodes: string[]; durationUnits: number } {
   const tokens = step.trim().split(/\s+/);
   const durationUnits = Math.max(3, parseInt(tokens[tokens.length - 1]) || 6);
-  const noteCodes     = tokens.slice(0, -1).filter(t => t.startsWith('p'));
+  const noteCodes = tokens.slice(0, -1)
+    .filter(t => t.startsWith('p'))
+    .map(t => t.includes(':') ? t.split(':')[0] : t);
   return { noteCodes, durationUnits };
 }
 

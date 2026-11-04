@@ -74,6 +74,12 @@ export default function SongCard({
       >
         <Feather name="music" size={20} color="#fff" />
 
+        {isNew && (
+          <View style={s.newBadge}>
+            <Text style={s.newBadgeText}>✦ Nuevo</Text>
+          </View>
+        )}
+
         {!isAdmin && isPurchased && (
           <View style={s.ownedBadge}>
             <Feather name="heart" size={11} color="#fff" />
@@ -116,12 +122,6 @@ export default function SongCard({
           )}
         </View>
       </LinearGradient>
-
-      {isNew && (
-        <View style={s.newBadge}>
-          <Text style={s.newBadgeText}>✦ Nuevo</Text>
-        </View>
-      )}
 
       {/* Body */}
       <View style={s.body}>
@@ -180,8 +180,7 @@ const s = StyleSheet.create({
   cardNew: { borderWidth: 2, borderColor: '#f97316' },
   header:  { paddingHorizontal: 14, paddingVertical: 10, flexDirection: 'row', alignItems: 'center' },
   newBadge: {
-    position: 'absolute', left: 42, top: 30,
-    zIndex: 10, elevation: 10,
+    marginLeft: 8,
     backgroundColor: 'rgba(255,255,255,0.25)', borderRadius: 20,
     paddingHorizontal: 8, paddingVertical: 3,
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.4)',

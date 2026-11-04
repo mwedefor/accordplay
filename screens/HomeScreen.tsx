@@ -9,6 +9,7 @@ import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { useDashboard } from '../hooks/useDashboard';
 import { useUserProfile } from '../context/UserProfileContext';
+import { useSubscription } from '../hooks/useSubscription';
 import ScreenLayout from '../components/ScreenLayout';
 import { NAV_RAIL_W } from '../components/NavRail';
 import type { Song } from '../types';
@@ -33,14 +34,14 @@ function getYoutubeThumbnail(link: string): string | null {
 
 // ── Quick actions ─────────────────────────────────────────────────────────────
 const ALL_QUICK_ACTIONS = [
-  { key: 'songs',     label: 'Explorar biblioteca', icon: 'music',        color: '#3b82f6', screen: null,        instrument: null },
-  { key: 'mymusic',   label: 'Mis canciones',       icon: 'heart',        color: '#ef4444', screen: null,        instrument: null },
-  { key: 'accordion', label: 'Tocar acordeón',      icon: 'sliders',      color: '#f97316', screen: 'Accordion', instrument: 'accordion' },
-  { key: 'piano',     label: 'Practicar piano',     icon: 'play',         color: '#8b5cf6', screen: 'Piano',      instrument: 'piano' },
-  { key: 'recorder',  label: 'Tocar flauta',        icon: 'mic',          color: '#0d9488', screen: null,        instrument: 'recorder' },
-  { key: 'violin',    label: 'Tocar violín',        icon: 'activity',     color: '#b45309', screen: null,        instrument: 'violin' },
-  { key: 'guitar',    label: 'Tocar guitarra',      icon: 'headphones',   color: '#ca8a04', screen: null,        instrument: 'guitar' },
-  { key: 'tasks',     label: 'Mis tareas',          icon: 'check-square', color: '#22c55e', screen: null,        instrument: null },
+  { key: 'songs',     label: 'Explorar biblioteca', icon: 'music',        color: '#3b82f6', screen: null,        instrument: null,        tab: null },
+  { key: 'mymusic',   label: 'Mis canciones',       icon: 'heart',        color: '#ef4444', screen: null,        instrument: null,        tab: null },
+  { key: 'accordion', label: 'Tocar acordeón',      icon: 'sliders',      color: '#f97316', screen: 'Accordion', instrument: 'accordion', tab: null },
+  { key: 'piano',     label: 'Practicar piano',     icon: 'play',         color: '#8b5cf6', screen: 'Piano',     instrument: 'piano',     tab: null },
+  { key: 'recorder',  label: 'Tocar flauta',        icon: 'mic',          color: '#0d9488', screen: 'Recorder',  instrument: 'recorder',  tab: null },
+  { key: 'violin',    label: 'Tocar violín',        icon: 'activity',     color: '#b45309', screen: null,        instrument: 'violin',    tab: 'violin' },
+  { key: 'guitar',    label: 'Tocar guitarra',      icon: 'headphones',   color: '#ca8a04', screen: null,        instrument: 'guitar',    tab: 'guitarra' },
+  { key: 'tasks',     label: 'Mis tareas',          icon: 'check-square', color: '#22c55e', screen: null,        instrument: null,        tab: null },
 ];
 
 // ── Instrument emoji map ──────────────────────────────────────────────────────
@@ -75,22 +76,40 @@ function SongThumbnail({ song }: { song: Song }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 const BANNER_INSTRUMENTS = [
-  { label: 'Acordeón', emoji: '🪗', screen: 'Accordion' },
-  { label: 'Piano',    emoji: '🎹', screen: 'Piano' },
-  { label: 'Flauta',   emoji: '🪈', screen: null },
-  { label: 'Violín',   emoji: '🎻', screen: null },
-  { label: 'Guitarra', emoji: '🎸', screen: null },
+  { label: 'Acordeón', emoji: '🪗', screen: 'Accordion', tab: null },
+  { label: 'Piano',    emoji: '🎹', screen: 'Piano',     tab: null },
+  { label: 'Flauta',   emoji: '🪈', screen: 'Recorder', tab: null },
+  { label: 'Violín',   emoji: '🎻', screen: null,        tab: 'violin' },
+  { label: 'Guitarra', emoji: '🎸', screen: null,        tab: 'guitarra' },
 ];
 
 export default function HomeScreen({ navigation }: any) {
   const { user } = useAuth();
   const { loading, stats, pendingTodos, recentSongs } = useDashboard();
   const { instruments, profileLoading } = useUserProfile();
+  const {
+    hasActiveAccordionAccess, hasActivePianoAccess, hasActiveRecorderAccess,
+    hasActiveViolinAccess, hasActiveGuitarAccess, loading: subLoading,
+  } = useSubscription();
 
-  // Show all instruments while loading or if user has no purchased songs yet (new user);
-  // otherwise filter to only the instruments the user has purchased.
-  const QUICK_ACTIONS = !profileLoading && instruments.length > 0
-    ? ALL_QUICK_ACTIONS.filter(a => !a.instrument || instruments.includes(a.instrument as any))
+  const subscriptionInstruments: string[] = [
+    hasActiveAccordionAccess && 'accordion',
+    hasActivePianoAccess     && 'piano',
+    hasActiveRecorderAccess  && 'recorder',
+    hasActiveViolinAccess    && 'violin',
+    hasActiveGuitarAccess    && 'guitar',
+  ].filter(Boolean) as string[];
+
+  const anyLoading = profileLoading || subLoading;
+  const hasAny = instruments.length > 0 || subscriptionInstruments.length > 0;
+
+  // Show all when still loading or user has nothing yet; otherwise filter by purchased + subscription
+  const QUICK_ACTIONS = !anyLoading && hasAny
+    ? ALL_QUICK_ACTIONS.filter(a =>
+        !a.instrument ||
+        instruments.includes(a.instrument as any) ||
+        subscriptionInstruments.includes(a.instrument)
+      )
     : ALL_QUICK_ACTIONS;
   const { width: screenWidth } = useWindowDimensions();
 
@@ -149,10 +168,11 @@ export default function HomeScreen({ navigation }: any) {
                   style={[
                     styles.bannerBtn,
                     { width: btnSize, height: btnSize, borderRadius: btnSize * 0.22 },
-                    !b.screen && { opacity: 0.55 },
                   ]}
-                  onPress={() => b.screen && navigation.navigate(b.screen)}
-                  disabled={!b.screen}
+                  onPress={() => {
+                    if (b.screen) navigation.navigate(b.screen);
+                    else if (b.tab) navigation.navigate('Songs', { initialTab: b.tab });
+                  }}
                   activeOpacity={0.8}
                 >
                   <Text style={[styles.bannerBtnEmoji, { fontSize: btnSize * 0.48 }]}>
@@ -202,10 +222,13 @@ export default function HomeScreen({ navigation }: any) {
               style={[
                 styles.quickBtn,
                 { backgroundColor: a.color, width: qaSize, height: qaSize, borderRadius: qaSize * 0.22 },
-                !a.screen && { opacity: 0.5 },
+                !a.screen && !a.tab && { opacity: 0.5 },
               ]}
-              onPress={() => a.screen && navigation.navigate(a.screen)}
-              disabled={!a.screen}
+              onPress={() => {
+                if (a.screen) navigation.navigate(a.screen);
+                else if (a.tab) navigation.navigate('Songs', { initialTab: a.tab });
+              }}
+              disabled={!a.screen && !a.tab}
               activeOpacity={0.8}
             >
               <Feather name={a.icon as any} size={Math.round(qaSize * 0.38)} color="#fff" />
@@ -249,9 +272,13 @@ export default function HomeScreen({ navigation }: any) {
                   onPress={() => {
                     const inst = song.instrument?.toLowerCase() ?? '';
                     if (inst === 'acordeon' || inst === 'acordeón' || inst === 'accordion') {
-                      navigation.navigate('Accordion');
+                      navigation.navigate('Accordion', { songId: song.songId, songName: song.name });
                     } else if (inst === 'piano') {
-                      navigation.navigate('Piano');
+                      navigation.navigate('Piano', { songId: song.songId, songName: song.name });
+                    } else if (inst.includes('recorder') || inst.includes('flauta')) {
+                      navigation.navigate('Recorder', { songId: song.songId, songName: song.name });
+                    } else if (inst.includes('violin') || inst.includes('violín')) {
+                      navigation.navigate('Violin', { songId: song.songId, songName: song.name });
                     }
                   }}
                   activeOpacity={0.7}

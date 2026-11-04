@@ -28,20 +28,26 @@ function isPianoSong(song: Song) {
   return (song.instrument ?? '').toLowerCase() === 'piano';
 }
 
+function isRecorderSong(song: Song) {
+  const i = (song.instrument ?? '').toLowerCase();
+  return i.includes('recorder') || i.includes('flauta');
+}
+
 interface Props {
   songs: Song[];
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
   navigation: any;
+  initialTab?: InstrumentTab;
 }
 
-export default function SongsGrid({ songs, loading, error, onRefresh, navigation }: Props) {
+export default function SongsGrid({ songs, loading, error, onRefresh, navigation, initialTab }: Props) {
   const { user, token } = useAuth();
   const isAdmin = user?.role === 'admin';
 
   const { purchasedSongs }                    = usePurchasedSongs();
-  const { hasActiveAccordionAccess, subscriptions: allSubs, activeList: activeSubs, loading: subLoading, refresh: refreshSubs } = useSubscription();
+  const { hasActiveAccordionAccess, hasActivePianoAccess, hasActiveRecorderAccess, subscriptions: allSubs, activeList: activeSubs, loading: subLoading, refresh: refreshSubs } = useSubscription();
   const { folders, createFolder, moveSongToFolder } = useFolders(songs, token ?? null);
 
   const purchasedIds = useMemo(() => new Set(purchasedSongs.map(s => s.songId)), [purchasedSongs]);
@@ -58,7 +64,7 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
   const [visOverrides, setVisOverrides]     = useState<Map<string, boolean>>(new Map());
   const [folderOverrides, setFolderOverrides] = useState<Map<string, string | null>>(new Map());
   const [creatingFolder, setCreatingFolder] = useState(false);
-  const [instrumentTab, setInstrumentTab]   = useState<InstrumentTab>('accordion');
+  const [instrumentTab, setInstrumentTab]   = useState<InstrumentTab>(initialTab ?? 'accordion');
   const [renameFolder, setRenameFolder]     = useState<Song | null>(null);
   const [renameName, setRenameName]         = useState('');
 
@@ -78,6 +84,11 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
 
   const pianoSongs = useMemo(
     () => mergedSongs.filter(s => s.type !== 'folder' && isPianoSong(s) && !deletedIds.has(s.songId) && (isAdmin || s.isVisible === true)),
+    [mergedSongs, deletedIds, isAdmin],
+  );
+
+  const recorderSongs = useMemo(
+    () => mergedSongs.filter(s => s.type !== 'folder' && isRecorderSong(s) && !deletedIds.has(s.songId) && (isAdmin || s.isVisible === true)),
     [mergedSongs, deletedIds, isAdmin],
   );
 
@@ -113,14 +124,63 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
 
   const filteredPianoSongs = useMemo(() => {
     const q = searchTerm.toLowerCase();
-    return pianoSongs.filter(s =>
-      !q || s.name.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q),
-    ).sort((a, b) => parseInt(b.createdAt, 10) - parseInt(a.createdAt, 10));
-  }, [pianoSongs, searchTerm]);
+    let list = pianoSongs.filter(s => {
+      if (activeFolderId !== null) return s.folderId === activeFolderId;
+      if (s.folderId) return false;
+      return !q || s.name.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q);
+    });
+    if (filter === 'recent') {
+      const cutoff = Date.now() - 15 * 24 * 60 * 60 * 1000;
+      list = list.filter(s => parseInt(s.createdAt, 10) > cutoff);
+    } else if (filter === 'by-price') {
+      list = list.filter(s => s.price < 8000);
+    }
+    return list.sort((a, b) => {
+      switch (sortBy) {
+        case 'name':   return a.name.localeCompare(b.name);
+        case 'artist': return a.artist.localeCompare(b.artist);
+        case 'price':  return a.price - b.price;
+        default:       return parseInt(b.createdAt, 10) - parseInt(a.createdAt, 10);
+      }
+    });
+  }, [pianoSongs, searchTerm, filter, sortBy, activeFolderId]);
+
+  const filteredRecorderSongs = useMemo(() => {
+    const q = searchTerm.toLowerCase();
+    let list = recorderSongs.filter(s => {
+      if (activeFolderId !== null) return s.folderId === activeFolderId;
+      if (s.folderId) return false;
+      return !q || s.name.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q);
+    });
+    if (filter === 'recent') {
+      const cutoff = Date.now() - 15 * 24 * 60 * 60 * 1000;
+      list = list.filter(s => parseInt(s.createdAt, 10) > cutoff);
+    } else if (filter === 'by-price') {
+      list = list.filter(s => s.price < 8000);
+    }
+    return list.sort((a, b) => {
+      switch (sortBy) {
+        case 'name':   return a.name.localeCompare(b.name);
+        case 'artist': return a.artist.localeCompare(b.artist);
+        case 'price':  return a.price - b.price;
+        default:       return parseInt(b.createdAt, 10) - parseInt(a.createdAt, 10);
+      }
+    });
+  }, [recorderSongs, searchTerm, filter, sortBy, activeFolderId]);
 
   const visibleFolders = useMemo(() => {
     if (instrumentTab !== 'accordion') return [];
     return activeFolderId !== null ? [] : folders.filter(f => isAccordionSong(f));
+  }, [folders, activeFolderId, instrumentTab]);
+
+  const visiblePianoFolders = useMemo(() => {
+    if (instrumentTab !== 'piano') return [];
+    return activeFolderId !== null ? [] : folders.filter(f => isPianoSong(f));
+  }, [folders, activeFolderId, instrumentTab]);
+
+  const visibleRecorderFolders = useMemo(() => {
+    if (instrumentTab !== 'flauta') return [];
+    return activeFolderId !== null ? [] : folders.filter(f => isRecorderSong(f));
   }, [folders, activeFolderId, instrumentTab]);
 
   const songCountInFolder = useMemo(() => {
@@ -141,7 +201,9 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
   const isPurchasedSong = (song: Song) =>
     isAdmin ||
     purchasedIds.has(song.songId) ||
-    (hasActiveAccordionAccess && isAccordionSong(song));
+    (hasActiveAccordionAccess && isAccordionSong(song)) ||
+    (hasActivePianoAccess && isPianoSong(song)) ||
+    (hasActiveRecorderAccess && isRecorderSong(song));
 
   // --- admin actions ---
   const handleDelete = useCallback(async (song: Song) => {
@@ -202,6 +264,40 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
     );
   }, [token, createFolder, onRefresh]);
 
+  const handleCreatePianoFolder = useCallback(async () => {
+    if (!token) return;
+    Alert.prompt?.(
+      'Nueva carpeta',
+      'Nombre de la carpeta:',
+      async (name: string) => {
+        if (!name?.trim()) return;
+        setCreatingFolder(true);
+        try {
+          await createFolder(name.trim(), 'Piano');
+          onRefresh();
+        } catch { Alert.alert('Error', 'No se pudo crear la carpeta'); }
+        finally { setCreatingFolder(false); }
+      },
+    );
+  }, [token, createFolder, onRefresh]);
+
+  const handleCreateRecorderFolder = useCallback(async () => {
+    if (!token) return;
+    Alert.prompt?.(
+      'Nueva carpeta',
+      'Nombre de la carpeta:',
+      async (name: string) => {
+        if (!name?.trim()) return;
+        setCreatingFolder(true);
+        try {
+          await createFolder(name.trim(), 'Flauta Dulce');
+          onRefresh();
+        } catch { Alert.alert('Error', 'No se pudo crear la carpeta'); }
+        finally { setCreatingFolder(false); }
+      },
+    );
+  }, [token, createFolder, onRefresh]);
+
   const handleDeleteFolder = useCallback(async (folder: Song) => {
     if (!token) return;
     Alert.alert(
@@ -240,11 +336,19 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
     finally { setRenameFolder(null); }
   }, [token, renameFolder, renameName, onRefresh]);
 
-  // --- membership card logic (accordion tab) ---
+  // --- membership card logic ---
   // busca primero en activeList, cae a allSubs para admin que puede no pasar el filtro en mobile
   const accordionSub = activeSubs.find(s => s.plan?.startsWith('accordion_'))
     ?? allSubs.find(s => s.plan?.startsWith('accordion_'));
   const showMembership = !subLoading && (hasActiveAccordionAccess || isAdmin);
+
+  const pianoSub = activeSubs.find(s => s.plan?.startsWith('piano_'))
+    ?? allSubs.find(s => s.plan?.startsWith('piano_'));
+  const showPianoMembership = !subLoading && (hasActivePianoAccess || isAdmin);
+
+  const recorderSub = activeSubs.find(s => s.plan?.startsWith('recorder_'))
+    ?? allSubs.find(s => s.plan?.startsWith('recorder_'));
+  const showRecorderMembership = !subLoading && (hasActiveRecorderAccess || isAdmin);
 
   // --- filter / sort labels ---
   const FILTERS: { key: FilterKey; label: string }[] = [
@@ -300,7 +404,8 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
   }, [sortBy]);
 
   const isEmpty = !loading && !error && visibleFolders.length === 0 && filteredSongs.length === 0 && instrumentTab === 'accordion';
-  const isPianoEmpty = !loading && !error && filteredPianoSongs.length === 0 && instrumentTab === 'piano';
+  const isPianoEmpty = !loading && !error && filteredPianoSongs.length === 0 && visiblePianoFolders.length === 0 && instrumentTab === 'piano';
+  const isRecorderEmpty = !loading && !error && filteredRecorderSongs.length === 0 && visibleRecorderFolders.length === 0 && instrumentTab === 'flauta';
 
   return (
     <>
@@ -330,7 +435,7 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
       </KeyboardAvoidingView>
     </Modal>
     <FlatList
-      data={instrumentTab === 'piano' ? filteredPianoSongs : filteredSongs}
+      data={instrumentTab === 'piano' ? filteredPianoSongs : instrumentTab === 'flauta' ? filteredRecorderSongs : filteredSongs}
       keyExtractor={item => item.songId}
       showsVerticalScrollIndicator={false}
       onRefresh={onRefresh}
@@ -353,12 +458,26 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
               <View style={s.titleBlock}>
                 <Text style={s.title}>Biblioteca Musical</Text>
                 <Text style={s.subtitle}>
-                  {instrumentTab === 'piano' ? 'Explora el catálogo de piano' : 'Explora el catálogo de acordeón'}
+                  {instrumentTab === 'piano' ? 'Explora el catálogo de piano'
+                    : instrumentTab === 'flauta' ? 'Explora el catálogo de flauta dulce'
+                    : 'Explora el catálogo de acordeón'}
                 </Text>
               </View>
               <View style={s.titleActions}>
                 {isAdmin && instrumentTab === 'accordion' && (
                   <TouchableOpacity style={s.newFolderBtn} onPress={handleCreateFolder} disabled={creatingFolder} activeOpacity={0.8}>
+                    <Feather name="folder-plus" size={15} color="#4f46e5" />
+                    <Text style={s.newFolderText}>Carpeta</Text>
+                  </TouchableOpacity>
+                )}
+                {isAdmin && instrumentTab === 'piano' && (
+                  <TouchableOpacity style={s.newFolderBtn} onPress={handleCreatePianoFolder} disabled={creatingFolder} activeOpacity={0.8}>
+                    <Feather name="folder-plus" size={15} color="#4f46e5" />
+                    <Text style={s.newFolderText}>Carpeta</Text>
+                  </TouchableOpacity>
+                )}
+                {isAdmin && instrumentTab === 'flauta' && (
+                  <TouchableOpacity style={s.newFolderBtn} onPress={handleCreateRecorderFolder} disabled={creatingFolder} activeOpacity={0.8}>
                     <Feather name="folder-plus" size={15} color="#4f46e5" />
                     <Text style={s.newFolderText}>Carpeta</Text>
                   </TouchableOpacity>
@@ -456,7 +575,7 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
               {/* Result count */}
               {!loading && (
                 <Text style={s.count}>
-                  Mostrando {filteredSongs.length + visibleFolders.length} de {songs.length} canciones
+                  Mostrando {filteredSongs.length} de {songs.length} canciones
                 </Text>
               )}
 
@@ -518,7 +637,7 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
             </>
           ) : instrumentTab === 'piano' ? (
             <>
-              {/* Piano search */}
+              {/* Piano search + filter card */}
               <View style={s.controlCard}>
                 <View style={s.searchRow}>
                   <Feather name="search" size={16} color="#9ca3af" />
@@ -532,11 +651,79 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
                     clearButtonMode="while-editing"
                   />
                 </View>
+
+                <View style={s.cardDivider} />
+
+                <TouchableOpacity style={s.controlsRow} onPress={showFilterPicker} activeOpacity={0.7}>
+                  <Text style={s.dropdownText} numberOfLines={1}>{filterLabel}</Text>
+                  <Feather name="chevron-down" size={13} color="#6b7280" />
+                </TouchableOpacity>
+
+                <View style={s.cardDivider} />
+
+                <TouchableOpacity style={s.controlsRow} onPress={showSortPicker} activeOpacity={0.7}>
+                  <Text style={s.dropdownText} numberOfLines={1}>{sortLabel}</Text>
+                  <Feather name="chevron-down" size={13} color="#6b7280" />
+                </TouchableOpacity>
+
+                <View style={s.cardDivider} />
+
+                <View style={s.currencyRow}>
+                  <View style={s.currencyToggle}>
+                    <TouchableOpacity style={[s.currBtn, currency === 'COP' && s.currBtnActive]} onPress={() => setCurrency('COP')}>
+                      <Text style={[s.currText, currency === 'COP' && s.currTextActive]}>COP</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[s.currBtn, currency === 'USD' && s.currBtnActive]} onPress={() => setCurrency('USD')}>
+                      <Text style={[s.currText, currency === 'USD' && s.currTextActive]}>USD</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
               </View>
+
+              {/* Membership card */}
+              {showPianoMembership && (
+                <MembershipCard
+                  plan={pianoSub?.plan ?? 'piano_daily'}
+                  activeSub={pianoSub}
+                  colorTheme="blue"
+                  instrumentName="Piano"
+                  feature="Todas las canciones de piano incluidas"
+                  isAdmin={isAdmin}
+                  onRefresh={refreshSubs}
+                  refreshing={subLoading}
+                  onSubscribe={() => navigation.navigate('Subscription')}
+                />
+              )}
+
+              {/* Folder cards — 2-column grid */}
+              {!loading && !error && visiblePianoFolders.length > 0 && (
+                <View style={s.foldersSection}>
+                  {visiblePianoFolders.reduce<Song[][]>((rows, folder, i) => {
+                    if (i % 2 === 0) rows.push([folder]);
+                    else rows[rows.length - 1].push(folder);
+                    return rows;
+                  }, []).map((row, rowIdx) => (
+                    <View key={rowIdx} style={s.folderRow}>
+                      {row.map(folder => (
+                        <FolderCard
+                          key={folder.songId}
+                          folder={folder}
+                          songCount={songCountInFolder[folder.songId] ?? 0}
+                          isAdmin={isAdmin}
+                          onOpen={f => setActiveFolderId(f.songId)}
+                          onRename={isAdmin ? handleRenameFolder : undefined}
+                          onDelete={isAdmin ? handleDeleteFolder : undefined}
+                        />
+                      ))}
+                      {row.length === 1 && <View style={s.folderPlaceholder} />}
+                    </View>
+                  ))}
+                </View>
+              )}
 
               {!loading && (
                 <Text style={s.count}>
-                  Mostrando {filteredPianoSongs.length} de {pianoSongs.length} canciones
+                  Mostrando {filteredPianoSongs.length} de {songs.length} canciones
                 </Text>
               )}
 
@@ -547,11 +734,139 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
                 </View>
               )}
 
+              {!loading && error && (
+                <View style={s.center}>
+                  <Feather name="music" size={40} color="#ef4444" />
+                  <Text style={s.errorText}>{error}</Text>
+                  <TouchableOpacity style={s.retryBtn} onPress={onRefresh}>
+                    <Text style={s.retryText}>Reintentar</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
               {isPianoEmpty && (
                 <View style={s.center}>
                   <Feather name="music" size={40} color="#9ca3af" />
                   <Text style={s.emptyText}>
                     {searchTerm ? 'Sin resultados para tu búsqueda' : 'No hay canciones de piano disponibles'}
+                  </Text>
+                </View>
+              )}
+            </>
+          ) : instrumentTab === 'flauta' ? (
+            <>
+              {/* Flauta search + filter card */}
+              <View style={s.controlCard}>
+                <View style={s.searchRow}>
+                  <Feather name="search" size={16} color="#9ca3af" />
+                  <TextInput
+                    style={s.searchInput}
+                    placeholder="Buscar canción, artista…"
+                    placeholderTextColor="#9ca3af"
+                    value={searchTerm}
+                    onChangeText={setSearchTerm}
+                    returnKeyType="search"
+                    clearButtonMode="while-editing"
+                  />
+                </View>
+
+                <View style={s.cardDivider} />
+
+                <TouchableOpacity style={s.controlsRow} onPress={showFilterPicker} activeOpacity={0.7}>
+                  <Text style={s.dropdownText} numberOfLines={1}>{filterLabel}</Text>
+                  <Feather name="chevron-down" size={13} color="#6b7280" />
+                </TouchableOpacity>
+
+                <View style={s.cardDivider} />
+
+                <TouchableOpacity style={s.controlsRow} onPress={showSortPicker} activeOpacity={0.7}>
+                  <Text style={s.dropdownText} numberOfLines={1}>{sortLabel}</Text>
+                  <Feather name="chevron-down" size={13} color="#6b7280" />
+                </TouchableOpacity>
+
+                <View style={s.cardDivider} />
+
+                <View style={s.currencyRow}>
+                  <View style={s.currencyToggle}>
+                    <TouchableOpacity style={[s.currBtn, currency === 'COP' && s.currBtnActive]} onPress={() => setCurrency('COP')}>
+                      <Text style={[s.currText, currency === 'COP' && s.currTextActive]}>COP</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[s.currBtn, currency === 'USD' && s.currBtnActive]} onPress={() => setCurrency('USD')}>
+                      <Text style={[s.currText, currency === 'USD' && s.currTextActive]}>USD</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+
+              {/* Membership card */}
+              {showRecorderMembership && (
+                <MembershipCard
+                  plan={recorderSub?.plan ?? 'recorder_daily'}
+                  activeSub={recorderSub}
+                  colorTheme="teal"
+                  instrumentName="Flauta"
+                  feature="Todas las canciones de flauta incluidas"
+                  isAdmin={isAdmin}
+                  onRefresh={refreshSubs}
+                  refreshing={subLoading}
+                  onSubscribe={() => navigation.navigate('Subscription')}
+                />
+              )}
+
+              {/* Folder cards — 2-column grid */}
+              {!loading && !error && visibleRecorderFolders.length > 0 && (
+                <View style={s.foldersSection}>
+                  {visibleRecorderFolders.reduce<Song[][]>((rows, folder, i) => {
+                    if (i % 2 === 0) rows.push([folder]);
+                    else rows[rows.length - 1].push(folder);
+                    return rows;
+                  }, []).map((row, rowIdx) => (
+                    <View key={rowIdx} style={s.folderRow}>
+                      {row.map(folder => (
+                        <FolderCard
+                          key={folder.songId}
+                          folder={folder}
+                          songCount={songCountInFolder[folder.songId] ?? 0}
+                          isAdmin={isAdmin}
+                          onOpen={f => setActiveFolderId(f.songId)}
+                          onRename={isAdmin ? handleRenameFolder : undefined}
+                          onDelete={isAdmin ? handleDeleteFolder : undefined}
+                        />
+                      ))}
+                      {row.length === 1 && <View style={s.folderPlaceholder} />}
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {!loading && (
+                <Text style={s.count}>
+                  Mostrando {filteredRecorderSongs.length} de {songs.length} canciones
+                </Text>
+              )}
+
+              {loading && (
+                <View style={s.center}>
+                  <ActivityIndicator size="large" color="#0d9488" />
+                  <Text style={s.loadingText}>Cargando canciones…</Text>
+                </View>
+              )}
+
+              {!loading && error && (
+                <View style={s.center}>
+                  <Feather name="music" size={40} color="#ef4444" />
+                  <Text style={s.errorText}>{error}</Text>
+                  <TouchableOpacity style={s.retryBtn} onPress={onRefresh}>
+                    <Text style={s.retryText}>Reintentar</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {isRecorderEmpty && (
+                <View style={s.center}>
+                  <Feather name="music" size={40} color="#9ca3af" />
+                  <Text style={s.emptyText}>
+                    {searchTerm ? 'Sin resultados para tu búsqueda' : 'No hay canciones de flauta disponibles'}
                   </Text>
                 </View>
               )}
@@ -576,7 +891,9 @@ export default function SongsGrid({ songs, loading, error, onRefresh, navigation
           inFolder={activeFolderId !== null}
           onPractice={song => {
             const inst = song.instrument?.toLowerCase() ?? '';
-            const screen = inst === 'piano' ? 'Piano' : 'Accordion';
+            let screen: string | null = 'Accordion';
+            if (inst === 'piano') screen = 'Piano';
+            else if (inst.includes('recorder') || inst.includes('flauta')) screen = 'Recorder';
             navigation.navigate(screen, { songId: song.songId, songName: song.name });
           }}
           onOpenLink={song => song.link && Linking.openURL(song.link)}

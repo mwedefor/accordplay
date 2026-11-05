@@ -4,10 +4,11 @@ import {
   Modal, PanResponder, ActivityIndicator, Dimensions,
 } from 'react-native';
 import {
-  initAudio, schedulePianoAt, cancelAllScheduled,
-  sweepEndedSources, getAudioCurrentTime, getAudioOutputLatencyMs,
-  playPianoNote, playPianoNoteManual, stopActivePiano,
+  initAudio,
+  playPianoNoteManual, stopActivePiano,
 } from '../components/pianoAudio';
+import WebView from 'react-native-webview';
+import { PIANO_EMBED_HTML } from '../assets/pianoEmbedHtml';
 import ScreenLayout from '../components/ScreenLayout';
 import { NAV_RAIL_W } from '../components/NavRail';
 import { DEMO_NOTES, DEMO_NAME, DEMO_SPEED_MS, DEMO_DATA } from '../data/pianoDemo';
@@ -23,79 +24,21 @@ function parsePianoStep(step: string): { noteCodes: string[]; durationUnits: num
   return { noteCodes, durationUnits };
 }
 
-// Normalize note code to canonical flat key id used in keyboard layout
-// e.g. pFs5 → Gb5, pCs5 → Db5, pDs4 → Eb4
-const SHARP_TO_FLAT: Record<string, [string, number]> = {
-  'As': ['Bb',  0], 'Bs': ['C',   1],
-  'Cs': ['Db',  0], 'Ds': ['Eb',  0],
-  'Es': ['F',   0], 'Fs': ['Gb',  0],
-  'Gs': ['Ab',  0],
-};
-const FLAT_ADJ: Record<string, [string, number]> = {
-  'Cb': ['B', -1], 'Fb': ['E', 0],
-};
-function codeToKey(code: string): string {
-  const body  = code.slice(1);
-  const match = body.match(/^([A-G][bs]?)(\d+)$/);
-  if (!match) return body;
-  let [, note, octStr] = match;
-  let oct = parseInt(octStr);
-  if (note in SHARP_TO_FLAT) {
-    const [n, d] = SHARP_TO_FLAT[note];
-    note = n; oct += d;
-  } else if (note in FLAT_ADJ) {
-    const [n, d] = FLAT_ADJ[note];
-    note = n; oct += d;
-  }
-  return `${note}${oct}`;
-}
-
-// ── Piano keyboard definition — C1 to C8 (7 octaves, standard piano range) ───
-const W_NOTES = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
-const B_NOTES: [string, number][] = [
-  ['Db', 0], ['Eb', 1], ['Gb', 3], ['Ab', 4], ['Bb', 5],
-];
-const OCTAVES = [1, 2, 3, 4, 5, 6, 7];
-
-type KeyDef = { id: string; octave: number; isBlack: boolean; wOffset: number; bAfterW?: number };
-const KEY_DEFS: KeyDef[] = [];
-let totalWhites = 0;
-// A0, Bb0, B0 — the 3 keys before C1 on a standard 88-key piano
-KEY_DEFS.push({ id: 'A0',  octave: 0, isBlack: false, wOffset: 0 });
-KEY_DEFS.push({ id: 'Bb0', octave: 0, isBlack: true,  wOffset: 0, bAfterW: 0 });
-KEY_DEFS.push({ id: 'B0',  octave: 0, isBlack: false, wOffset: 1 });
-totalWhites = 2;
-for (const oct of OCTAVES) {
-  const octStart = totalWhites;
-  for (let wi = 0; wi < 7; wi++) {
-    KEY_DEFS.push({ id: `${W_NOTES[wi]}${oct}`, octave: oct, isBlack: false, wOffset: octStart + wi });
-  }
-  for (const [bNote, afterW] of B_NOTES) {
-    KEY_DEFS.push({ id: `${bNote}${oct}`, octave: oct, isBlack: true, wOffset: 0, bAfterW: octStart + afterW });
-  }
-  totalWhites += 7;
-}
-// Add top C8
-KEY_DEFS.push({ id: 'C8', octave: 8, isBlack: false, wOffset: totalWhites });
-totalWhites += 1; // totalWhites = 52
-
-const KEY_BORDER = 1;
+// Standard 88-key piano has 52 white keys (A0–C8)
+const totalWhites = 52;
 
 
 export default function PianoScreen({ navigation, route }: any) {
   const { songId, songName: routeSongName } = (route?.params ?? {}) as { songId?: string; songName?: string };
   const SCREEN_W   = Dimensions.get('window').width;
   const CONTENT_W  = SCREEN_W - NAV_RAIL_W;
-  const W_KEY_H    = Math.round(CONTENT_W * 0.40);  // key depth scales with screen width
-  const B_KEY_H    = Math.round(W_KEY_H * 0.65);
+  const W_KEY_H    = Math.round(CONTENT_W * 0.40);
   const KB_COL_W   = W_KEY_H + 8;
   const CTRL_COL_W = CONTENT_W - KB_COL_W;
 
   const [ctrlH, setCtrlH] = useState(0);
 
-  // Key height: dynamic with 24px total vertical margin (12px each side)
-  const W_KEY_W  = ctrlH > 0 ? (ctrlH - 48) / totalWhites : 12;
-  const B_KEY_W  = W_KEY_W * 0.6;
+  const W_KEY_W  = ctrlH > 0 ? ctrlH / totalWhites : 12;
   const KB_TOTAL = totalWhites * W_KEY_W;
 
   const { songData, loading: partsLoading, error: partsError } = useSongParts(songId);
@@ -107,12 +50,8 @@ export default function PianoScreen({ navigation, route }: any) {
   const [isPlaying,         setIsPlaying]         = useState(false);
   const [count,             setCount]             = useState(0);
   const [speed,             setSpeed]             = useState(DEMO_SPEED_MS);
-  const [audioReady,        setAudioReady]        = useState(false);
   const [sectionIdx,        setSectionIdx]        = useState(0);
   const [showSectionPicker, setShowSectionPicker] = useState(false);
-  const [activeKeys,        setActiveKeys]        = useState<Set<string>>(new Set());
-  const [noteLabelMode,     setNoteLabelMode]     = useState<'off' | 'abc' | 'solfege'>('off');
-  const cycleNoteLabels = () => setNoteLabelMode(m => m === 'off' ? 'abc' : m === 'abc' ? 'solfege' : 'off');
 
   const _s0len = songId ? 0 : DEMO_DATA.sections[0].end - DEMO_DATA.sections[0].start;
   const [loopStart, setLoopStart] = useState(0);
@@ -157,15 +96,15 @@ export default function PianoScreen({ navigation, route }: any) {
   const speedRef       = useRef(DEMO_SPEED_MS);
   const sectionIdxRef  = useRef(0);
   const playSession    = useRef(0);
+  const isPlayingRef   = useRef(false);
+  const nextStepIdx    = useRef(0);
+  const webViewRef     = useRef<WebView>(null);
+  const webViewMountedRef = useRef(false);
+  const [webViewAudioReady, setWebViewAudioReady] = useState(false);
+  const labelModeRef = useRef<'off' | 'en' | 'sol'>('off');
+  const [labelMode, setLabelMode] = useState<'off' | 'en' | 'sol'>('off');
 
-  const schedulerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  const nextAudioTime     = useRef(0);
-  const nextStepIdx       = useRef(0);
-  const LOOKAHEAD_SEC     = 0.5;
-  const SCHEDULE_INTERVAL = 100;
-  const activeTimers      = useRef<ReturnType<typeof setTimeout>[]>([]);
-
-  useEffect(() => { initAudio().then(() => setAudioReady(true)); }, []);
+  useEffect(() => { initAudio(); }, []);
 
   useEffect(() => {
     if (!songData) return;
@@ -175,13 +114,8 @@ export default function PianoScreen({ navigation, route }: any) {
     setSpeed(songData.speedMs);
     speedRef.current = songData.speedMs;
     playSession.current++;
-    if (schedulerRef.current !== null) { clearInterval(schedulerRef.current); schedulerRef.current = null; }
-    for (const t of activeTimers.current) clearTimeout(t);
-    activeTimers.current = [];
-    cancelAllScheduled();
     stopActivePiano();
-    setIsPlaying(false);
-    setActiveKeys(new Set());
+    setIsPlaying(false); isPlayingRef.current = false;
     sectionIdxRef.current = 0; setSectionIdx(0);
     countRef.current = 0; setCount(0);
     nextStepIdx.current = 0;
@@ -190,197 +124,126 @@ export default function PianoScreen({ navigation, route }: any) {
       loopStartRef.current = 0; loopEndRef.current = s0len;
       setLoopStart(0); setLoopEnd(s0len);
     }
+    setWebViewAudioReady(false);
+    sendLoadToWebView(0);
   }, [songData]);
 
-  // ── Lookahead scheduler ───────────────────────────────────────────────────────
-  const scheduleStepAt = useCallback((stepStr: string, stepTimeSec: number, displayIdx: number, session: number) => {
-    const { noteCodes, durationUnits } = parsePianoStep(stepStr);
-    const durationMs  = (durationUnits / 6) * speedRef.current;
-    const durationSec = durationMs / 1000;
-
-    for (const code of noteCodes) {
-      schedulePianoAt(code, stepTimeSec, durationSec);
-    }
-
-    const latSec      = getAudioOutputLatencyMs() / 1000;
-    const msUntilVis  = Math.max(0, (stepTimeSec + latSec - getAudioCurrentTime()) * 1000);
-    const shadowMs    = Math.min(600, Math.max(80, durationMs * 0.9));
-
-    activeTimers.current.push(setTimeout(() => {
-      if (playSession.current !== session) return;
-      countRef.current = displayIdx;
-      setCount(displayIdx);
-      const keys = new Set(noteCodes.map(codeToKey));
-      setActiveKeys(keys);
-      activeTimers.current.push(setTimeout(() => {
-        if (playSession.current === session) setActiveKeys(new Set());
-      }, shadowMs));
-    }, msUntilVis));
-
-    nextAudioTime.current = stepTimeSec + durationSec;
-    nextStepIdx.current++;
+  // ── WebView communication ─────────────────────────────────────────────────────
+  const sendToWebView = useCallback((msg: object) => {
+    const json = JSON.stringify(JSON.stringify(msg));
+    webViewRef.current?.injectJavaScript(
+      `(function(){var d=${json};window.dispatchEvent(new MessageEvent('message',{data:d}));document.dispatchEvent(new MessageEvent('message',{data:d}));})();true;`
+    );
   }, []);
 
-  const scheduleLoop = useCallback((session: number) => {
-    sweepEndedSources();
-    const lookaheadEnd = getAudioCurrentTime() + LOOKAHEAD_SEC;
-    while (nextAudioTime.current < lookaheadEnd) {
-      const sec      = activeSectionsRef.current[sectionIdxRef.current];
-      const rStart   = loopStartRef.current;
-      const rEnd     = loopEndRef.current;
-      if (rEnd - rStart <= 0) break;
-      const offset = nextStepIdx.current % (rEnd - rStart);
-      const local  = rStart + offset;
-      scheduleStepAt(activeNotesRef.current[sec.start + local], nextAudioTime.current, local, session);
+  const sendLoadToWebView = useCallback((secIdx: number) => {
+    const sec = activeSectionsRef.current[secIdx];
+    if (!sec) return;
+    const notes = activeNotesRef.current.slice(sec.start, sec.end);
+    sendToWebView({
+      type: 'load',
+      notes,
+      speedMs:   speedRef.current,
+      loopStart: loopStartRef.current,
+      loopEnd:   loopEndRef.current,
+    });
+  }, [sendToWebView]);
+
+  const handleWebViewMessage = useCallback((event: any) => {
+    let msg: any;
+    try { msg = JSON.parse(event.nativeEvent.data); } catch { return; }
+    if (msg.type === 'mounted') {
+      webViewMountedRef.current = true;
+      sendLoadToWebView(sectionIdxRef.current);
+    } else if (msg.type === 'ready') {
+      setWebViewAudioReady(true);
+      sendToWebView({ type: 'setLabels', mode: labelModeRef.current });
+    } else if (msg.type === 'count') {
+      countRef.current = msg.value;
+      setCount(msg.value);
+      nextStepIdx.current = msg.value - loopStartRef.current;
+    } else if (msg.type === 'playState' && !msg.playing) {
+      setIsPlaying(false); isPlayingRef.current = false;
     }
-  }, [scheduleStepAt]);
+  }, [sendLoadToWebView, sendToWebView]);
 
   const startPlay = useCallback(() => {
-    if (isPlaying || !audioReady) return;
-    const session = ++playSession.current;
-    const rStart = loopStartRef.current;
-    const rEnd   = loopEndRef.current;
-    const clamped = Math.max(rStart, Math.min(rEnd - 1, countRef.current));
-    nextAudioTime.current = getAudioCurrentTime() + 0.05;
-    nextStepIdx.current   = clamped - rStart;
-    stopActivePiano();
-    setIsPlaying(true);
-    scheduleLoop(session);
-    schedulerRef.current = setInterval(() => scheduleLoop(session), SCHEDULE_INTERVAL);
-  }, [isPlaying, audioReady, scheduleLoop]);
+    if (isPlayingRef.current || !webViewAudioReady) return;
+    setIsPlaying(true); isPlayingRef.current = true;
+    const rStart   = loopStartRef.current;
+    const rEnd     = loopEndRef.current;
+    const startIdx = Math.max(rStart, Math.min(rEnd - 1, countRef.current));
+    sendToWebView({ type: 'play', loopStart: rStart, loopEnd: rEnd, startIdx });
+  }, [webViewAudioReady, sendToWebView]);
 
   const stopPlay = useCallback(() => {
     playSession.current++;
-    if (schedulerRef.current !== null) { clearInterval(schedulerRef.current); schedulerRef.current = null; }
-    for (const t of activeTimers.current) clearTimeout(t);
-    activeTimers.current = [];
-    cancelAllScheduled();
+    sendToWebView({ type: 'stop' });
     stopActivePiano();
-    setIsPlaying(false);
-    setActiveKeys(new Set());
-  }, []);
+    setIsPlaying(false); isPlayingRef.current = false;
+  }, [sendToWebView]);
 
   const resetSong = useCallback(() => {
     stopPlay();
     countRef.current = 0; setCount(0);
-  }, [stopPlay]);
+    nextStepIdx.current = 0;
+    sendToWebView({ type: 'setCount', value: 0 });
+  }, [stopPlay, sendToWebView]);
 
   const changeSection = useCallback((newIdx: number) => {
-    if (isPlaying) stopPlay();
+    if (isPlayingRef.current) stopPlay();
     sectionIdxRef.current = newIdx; setSectionIdx(newIdx);
     countRef.current = 0; setCount(0);
     nextStepIdx.current = 0;
     const newLen = activeSectionsRef.current[newIdx].end - activeSectionsRef.current[newIdx].start;
     loopStartRef.current = 0; loopEndRef.current = newLen;
     setLoopStart(0); setLoopEnd(newLen);
-  }, [isPlaying, stopPlay]);
+    setWebViewAudioReady(false);
+    sendLoadToWebView(newIdx);
+  }, [stopPlay, sendLoadToWebView]);
+
+  const cycleLabelMode = useCallback(() => {
+    const next = labelModeRef.current === 'off' ? 'en' : labelModeRef.current === 'en' ? 'sol' : 'off';
+    labelModeRef.current = next;
+    setLabelMode(next);
+    sendToWebView({ type: 'setLabels', mode: next });
+  }, [sendToWebView]);
 
   const adjustSpeed = (delta: number) => {
     const s = Math.max(100, Math.min(1200, speed + delta));
     setSpeed(s); speedRef.current = s;
+    sendToWebView({ type: 'setSpeed', speedMs: s });
   };
 
   // Manual step navigation
   const playManualStep = useCallback((stepStr: string, displayIdx: number) => {
-    const { noteCodes } = parsePianoStep(stepStr);
-    setActiveKeys(new Set(noteCodes.map(codeToKey)));
+    const { noteCodes, durationUnits } = parsePianoStep(stepStr);
     countRef.current = displayIdx; setCount(displayIdx);
     for (const code of noteCodes) playPianoNoteManual(code);
-  }, []);
+    sendToWebView({ type: 'setCount', value: displayIdx });
+    if (noteCodes.length > 0) {
+      sendToWebView({ type: 'illuminate', codes: noteCodes });
+    }
+  }, [sendToWebView]);
 
   const stepPrev = useCallback(() => {
-    if (isPlaying) return;
+    if (isPlayingRef.current) return;
     const idx = Math.max(loopStartRef.current, countRef.current - 1);
     countRef.current = idx; nextStepIdx.current = idx - loopStartRef.current;
     const sec = activeSectionsRef.current[sectionIdxRef.current];
     playManualStep(activeNotesRef.current[sec.start + idx], idx);
-  }, [isPlaying, playManualStep]);
+  }, [playManualStep]);
 
   const stepNext = useCallback(() => {
-    if (isPlaying) return;
+    if (isPlayingRef.current) return;
     const idx = Math.min(loopEndRef.current - 1, countRef.current + 1);
     countRef.current = idx; nextStepIdx.current = idx - loopStartRef.current;
     const sec = activeSectionsRef.current[sectionIdxRef.current];
     playManualStep(activeNotesRef.current[sec.start + idx], idx);
-  }, [isPlaying, playManualStep]);
-
-  // Manual key tap
-  const onPressKey = useCallback((keyId: string) => {
-    playPianoNote(`p${keyId}`);
-    setActiveKeys(new Set([keyId]));
-    setTimeout(() => setActiveKeys(new Set()), 350);
-  }, []);
+  }, [playManualStep]);
 
   const currentSec = activeSections[sectionIdx] ?? activeSections[0];
   const secLen     = currentSec ? currentSec.end - currentSec.start : 0;
-
-  const NOTE_SOLFEGE: Record<string, string> = { C:'Do', D:'Re', E:'Mi', F:'Fa', G:'Sol', A:'La', B:'Si' };
-  const toLabelText = (id: string) => {
-    if (noteLabelMode === 'abc') return id;
-    const sol = NOTE_SOLFEGE[id[0]] ?? id[0];
-    return sol + id.slice(1);
-  };
-
-  // ── Render piano keyboard ─────────────────────────────────────────────────────
-  const renderKeyboard = () => {
-    const whiteKeys   = KEY_DEFS.filter(k => !k.isBlack);
-    const blackKeys   = KEY_DEFS.filter(k =>  k.isBlack);
-    return (
-      <View style={{ height: W_KEY_H + 8, position: 'relative', width: KB_TOTAL }}>
-        {/* White keys */}
-        {whiteKeys.map(key => {
-          const active = activeKeys.has(key.id);
-          return (
-            <TouchableOpacity
-              key={key.id}
-              activeOpacity={0.6}
-              onPress={() => onPressKey(key.id)}
-              style={[s.wKey, {
-                left: key.wOffset * W_KEY_W,
-                width: W_KEY_W - KEY_BORDER,
-                height: W_KEY_H,
-                backgroundColor: active ? '#f97316' : '#fff',
-                borderColor: '#9ca3af',
-              }]}
-            />
-          );
-        })}
-        {/* Key labels — separate layer, only when noteLabelMode is active */}
-        {noteLabelMode !== 'off' && whiteKeys.map(key => (
-          <Text
-            key={`lbl-${key.id}`}
-            style={[s.wKeyLabel, {
-              position: 'absolute',
-              left: key.wOffset * W_KEY_W,
-              width: W_KEY_W,
-              bottom: 8,
-              textAlign: 'center',
-            }]}
-            numberOfLines={1}
-          >
-            {toLabelText(key.id)}
-          </Text>
-        ))}
-        {/* Black keys — rendered on top */}
-        {blackKeys.map(key => {
-          const active = activeKeys.has(key.id);
-          return (
-            <TouchableOpacity
-              key={key.id}
-              activeOpacity={0.6}
-              onPress={() => onPressKey(key.id)}
-              style={[s.bKey, {
-                left: (key.bAfterW! + 1) * W_KEY_W - B_KEY_W / 2,
-                width: B_KEY_W,
-                height: B_KEY_H,
-                backgroundColor: active ? '#3b82f6' : '#1f2937',
-              }]}
-            />
-          );
-        })}
-      </View>
-    );
-  };
 
   return (
     <ScreenLayout navigation={navigation} activeKey="Piano" contentStyle={{ backgroundColor: '#f9fafb' }}>
@@ -405,21 +268,26 @@ export default function PianoScreen({ navigation, route }: any) {
       {/* Matches web's portrait mobile layout: low notes at bottom, high notes at top */}
       <View style={s.mainRow} onLayout={e => setCtrlH(e.nativeEvent.layout.height)}>
 
-        {/* ── Keyboard column ───────────────────────────────────────────────── */}
-        <View
-          style={[s.kbCol, { width: KB_COL_W }, (partsLoading || (!songData && !!songId)) && { opacity: 0.3 }]}
-        >
+        {/* ── Keyboard column — WebView rotated -90° ───────────────────────── */}
+        <View style={[s.kbCol, { width: KB_COL_W, overflow: 'hidden', backgroundColor: '#111827' }]}>
           {ctrlH > 0 && (
-            <View style={{
-              position: 'absolute',
-              // RN rotates around element center. Center this element at (KB_COL_W/2, ctrlH/2)
-              // so after -90° rotation it fills the column exactly.
-              left: (KB_COL_W - KB_TOTAL) / 2,  // negative when KB_TOTAL > KB_COL_W (expected)
-              top:  (ctrlH - W_KEY_H - 8) / 2,
-              transform: [{ rotate: '-90deg' }],
-            }}>
-              {renderKeyboard()}
-            </View>
+            <WebView
+              ref={webViewRef}
+              source={{ html: PIANO_EMBED_HTML, baseUrl: 'https://www.accordplay.com' }}
+              onMessage={handleWebViewMessage}
+              originWhitelist={['*']}
+              mediaPlaybackRequiresUserAction={false}
+              allowsInlineMediaPlayback
+              style={{
+                position: 'absolute',
+                width:  ctrlH,
+                height: KB_COL_W,
+                top:  (ctrlH  - KB_COL_W) / 2,
+                left: (KB_COL_W - ctrlH)  / 2,
+                backgroundColor: '#111827',
+                transform: [{ rotate: '-90deg' }],
+              }}
+            />
           )}
         </View>
 
@@ -453,7 +321,7 @@ export default function PianoScreen({ navigation, route }: any) {
                 <TouchableOpacity style={[s.btnBlue, isPlaying && s.btnGray]} onPress={stepPrev} disabled={isPlaying} activeOpacity={0.8}>
                   <Text style={s.btnTxt}>⏮</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[s.btnPlayLg, s.btnPlayGo, (isPlaying || !audioReady) && s.btnGray]} onPress={startPlay} disabled={isPlaying || !audioReady} activeOpacity={0.8}>
+                <TouchableOpacity style={[s.btnPlayLg, s.btnPlayGo, (isPlaying || !webViewAudioReady) && s.btnGray]} onPress={startPlay} disabled={isPlaying || !webViewAudioReady} activeOpacity={0.8}>
                   <Text style={s.btnPlayTxt}>▶</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={[s.btnPlayLg, s.btnPlayStop]} onPress={stopPlay} disabled={!isPlaying} activeOpacity={0.8}>
@@ -486,11 +354,13 @@ export default function PianoScreen({ navigation, route }: any) {
                 <Text style={s.btnResetTxt}>↺</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[s.btnNoteLabel, noteLabelMode === 'abc' && s.btnNoteLabelAbc, noteLabelMode === 'solfege' && s.btnNoteLabelSolfege]}
-                onPress={cycleNoteLabels}
+                style={[s.btnReset, labelMode !== 'off' && { backgroundColor: '#ede9fe', borderColor: '#c4b5fd' }]}
+                onPress={cycleLabelMode}
                 activeOpacity={0.8}
               >
-                <Text style={s.btnNoteLabelTxt}>🎵</Text>
+                <Text style={[s.btnResetTxt, labelMode === 'off' ? { fontSize: 20, fontWeight: '800' } : { fontSize: 11, fontWeight: '800' }]}>
+                  {labelMode === 'off' ? '♩' : labelMode === 'en' ? 'ABC' : 'Do'}
+                </Text>
               </TouchableOpacity>
               <View style={s.progressTrack} onLayout={e => { barWidthRef.current = e.nativeEvent.layout.width; }}>
                 <View style={[s.loopRange, {
@@ -546,7 +416,7 @@ const s = StyleSheet.create({
   titleTxt:  { fontSize: 18, fontWeight: '700', color: '#111827', textAlign: 'center', letterSpacing: 0.3 },
 
   // Row layout
-  mainRow: { flex: 1, flexDirection: 'row' },
+  mainRow: { flex: 1, flexDirection: 'row', marginVertical: 10 },
   kbCol: { marginLeft: 16 },
 
   // Controls column
@@ -587,10 +457,6 @@ const s = StyleSheet.create({
 
   btnReset:    { width: 36, height: 36, borderRadius: 8, backgroundColor: '#f3f4f6', borderWidth: 1, borderColor: '#e5e7eb', justifyContent: 'center', alignItems: 'center' },
   btnResetTxt: { fontSize: 16, color: '#4b5563' },
-  btnNoteLabel:        { width: 36, height: 36, borderRadius: 8, backgroundColor: '#f3f4f6', borderWidth: 1, borderColor: '#d1d5db', justifyContent: 'center', alignItems: 'center' },
-  btnNoteLabelAbc:     { backgroundColor: '#4f46e5', borderColor: '#4338ca' },
-  btnNoteLabelSolfege: { backgroundColor: '#0d9488', borderColor: '#0f766e' },
-  btnNoteLabelTxt:     { fontSize: 15 },
 
   progressTrack: { flex: 1, height: 26, backgroundColor: '#e5e7eb', borderRadius: 4, overflow: 'visible' },
   loopRange:     { position: 'absolute', top: 0, bottom: 0, backgroundColor: 'rgba(249,115,22,0.22)', borderRadius: 3 },
@@ -602,19 +468,6 @@ const s = StyleSheet.create({
   markerBlockEnd:    { position: 'absolute', right: 0, top: 0, bottom: 0, width: 16, backgroundColor: '#f97316', borderTopRightRadius: 3, borderBottomRightRadius: 3, alignItems: 'center', justifyContent: 'center' },
   markerLbl:         { fontSize: 6, color: '#fff', fontWeight: '800', lineHeight: 7, marginBottom: 1 },
   markerSymbol:      { fontSize: 10, color: '#fff', fontWeight: '900', lineHeight: 11 },
-
-  // Keyboard keys
-  wKey: {
-    position: 'absolute', top: 4, bottom: 4,
-    borderWidth: KEY_BORDER, borderRadius: 4,
-    shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 2, shadowOffset: { width: 0, height: 1 }, elevation: 1,
-  },
-  wKeyLabel: { fontSize: 5, lineHeight: 6, color: '#9ca3af', fontWeight: '600', flexShrink: 0 },
-  bKey: {
-    position: 'absolute', top: 4,
-    borderRadius: 3, zIndex: 10,
-    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 3, shadowOffset: { width: 0, height: 2 }, elevation: 4,
-  },
 
   // Loading / error
   loadingOverlay: { position: 'absolute', top: 56, left: 0, right: 0, bottom: 0, zIndex: 10, justifyContent: 'center', alignItems: 'center', gap: 12 },
